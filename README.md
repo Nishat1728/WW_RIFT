@@ -256,6 +256,13 @@ The workflow saves:
 The mask uses 0 for an original retained value, 1 for a source-null cell replaced by zero, and
 255 outside the active study area. Use `uncovered_policy: error` if any gap should pause instead.
 
+Before the RIFT rainfall HDF5 is created, the selected event is loaded into memory and every
+source NetCDF handle is closed. The HDF5 is then written and fully reopened for validation in
+node-local temporary storage before it is copied and atomically published under `rift_inputs/`.
+Batch jobs use `SLURM_TMPDIR` when available and otherwise `/tmp`. Set
+`RIFTPREP_HDF5_STAGING_DIR` to choose another staging filesystem. Progress checkpoints identify
+each mapped record, validation, transfer, and final publication in both notebooks and job logs.
+
 ## Output layout
 
 ```text

@@ -22,6 +22,11 @@ export PYTHONDONTWRITEBYTECODE=1
 export MPLBACKEND=Agg
 export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 export RIFTPREP_WARP_THREADS="${RIFTPREP_WARP_THREADS:-16}"
+export RIFTPREP_HDF5_STAGING_DIR="${RIFTPREP_HDF5_STAGING_DIR:-${SLURM_TMPDIR:-/tmp}}"
+
+echo "RIFT case: $CASE"
+echo "RIFT HDF5 staging directory: $RIFTPREP_HDF5_STAGING_DIR"
+echo "Slurm time limit: $(squeue -h -j "$SLURM_JOB_ID" -o %l)"
 
 "$PYTHON" hpc/run_six_case_notebook.py \
   --repository "$REPOSITORY" --output-root "$OUTPUT_ROOT" --case "$CASE"

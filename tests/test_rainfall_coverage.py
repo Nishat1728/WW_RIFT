@@ -9,7 +9,9 @@ from riftprep.config import GridSpec
 from riftprep.processing import prepare_aorc_event
 
 
-def test_uncovered_rainfall_is_zero_only_in_rift_field(tmp_path):
+def test_uncovered_rainfall_is_zero_only_in_rift_field(
+    tmp_path, monkeypatch, capsys
+):
     source_path = tmp_path / "raw.nc"
     original = np.full((1, 2, 2), 2.0, dtype=np.float32)
     xr.Dataset(
@@ -26,6 +28,9 @@ def test_uncovered_rainfall_is_zero_only_in_rift_field(tmp_path):
     )
     report_path = tmp_path / "qc" / "rainfall_coverage.json"
     hdf5_path = tmp_path / "rainfall.h5"
+    staging_root = tmp_path / "node-local"
+    staging_root.mkdir()
+    monkeypatch.setenv("RIFTPREP_HDF5_STAGING_DIR", str(staging_root))
     prepare_aorc_event(
         source_path,
         tmp_path / "event.nc",
@@ -37,6 +42,12 @@ def test_uncovered_rainfall_is_zero_only_in_rift_field(tmp_path):
         coverage_report_path=report_path,
         uncovered_policy="zero",
     )
+    progress = capsys.readouterr().out
+    assert "closed all source NetCDF handles" in progress
+    assert "reopening and validating the complete staged HDF5" in progress
+    assert f"published {hdf5_path}" in progress
+    assert list(staging_root.iterdir()) == []
+    assert list(hdf5_path.parent.glob(f".{hdf5_path.name}.*.tmp")) == []
     with xr.open_dataset(source_path) as unchanged:
         np.testing.assert_array_equal(unchanged.APCP_surface.values, original)
     with h5py.File(hdf5_path) as forcing:

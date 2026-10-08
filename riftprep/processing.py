@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Mapping
 
@@ -954,6 +957,86 @@ def _source_grid(event: xr.Dataset):
     raise ValueError("Rainfall must have x/y, longitude/latitude, or lon/lat coordinates.")
 
 
+def _rainfall_progress(message: str) -> None:
+    """Emit a checkpoint that remains visible in notebooks and batch logs."""
+    print(f"[riftprep rainfall] {message}", flush=True)
+
+
+def _rainfall_staging_root() -> Path:
+    """Choose local scratch when available, with an explicit user override."""
+    configured = os.environ.get("RIFTPREP_HDF5_STAGING_DIR")
+    slurm_tmp = os.environ.get("SLURM_TMPDIR")
+    root = Path(configured or slurm_tmp or tempfile.gettempdir()).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _validate_staged_rainfall_hdf5(
+    path: Path,
+    times_s: np.ndarray,
+    expected_hours: int,
+    cell_shape: tuple[int, int],
+) -> None:
+    """Reopen and fully read a staged forcing before publishing it."""
+    group_name = "precipitation rain [m s^-1]"
+    with h5py.File(path, "r") as source:
+        if "time [s]" not in source or group_name not in source:
+            raise ValueError("Staged rainfall HDF5 is missing required datasets.")
+        np.testing.assert_allclose(np.asarray(source["time [s]"], dtype=float), times_s)
+        group = source[group_name]
+        expected_keys = [str(index) for index in range(expected_hours + 1)]
+        if sorted(group.keys(), key=int) != expected_keys:
+            raise ValueError("Staged rainfall HDF5 has incomplete time records.")
+        for key in expected_keys:
+            values = np.asarray(group[key], dtype=float)
+            if values.shape != cell_shape:
+                raise ValueError(
+                    f"Staged rainfall record {key} has shape {values.shape}; "
+                    f"expected {cell_shape}."
+                )
+            if not np.isfinite(values).all() or np.any(values < 0):
+                raise ValueError(
+                    f"Staged rainfall record {key} contains invalid rates."
+                )
+
+
+def _publish_staged_file(staged_path: Path, final_path: Path) -> None:
+    """Copy to a neighboring temporary file, then atomically expose the result."""
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{final_path.name}.", suffix=".tmp",
+        dir=final_path.parent, delete=False,
+    ) as stream:
+        temporary_path = Path(stream.name)
+    copied = 0
+    report_interval = 512 * 1024 * 1024
+    next_report = report_interval
+    try:
+        with staged_path.open("rb") as source, temporary_path.open("wb") as target:
+            while True:
+                chunk = source.read(64 * 1024 * 1024)
+                if not chunk:
+                    break
+                target.write(chunk)
+                copied += len(chunk)
+                if copied >= next_report:
+                    _rainfall_progress(
+                        f"copied {copied / (1024 ** 3):.1f} GiB to the case filesystem"
+                    )
+                    next_report += report_interval
+            target.flush()
+            os.fsync(target.fileno())
+        expected_size = staged_path.stat().st_size
+        if copied != expected_size or temporary_path.stat().st_size != expected_size:
+            raise OSError(
+                f"Rainfall HDF5 copy is incomplete: copied {copied} of "
+                f"{expected_size} bytes."
+            )
+        os.replace(temporary_path, final_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 def prepare_aorc_event(
     source_path: str | Path,
     event_subset_path: str | Path,
@@ -971,33 +1054,53 @@ def prepare_aorc_event(
     start = pd.Timestamp(start_utc).tz_convert(None)
     end = pd.Timestamp(end_utc).tz_convert(None)
     expected_hours = int((end - start) / pd.Timedelta(hours=1))
+    source = event = None
+    _rainfall_progress(f"loading {expected_hours} selected hourly record(s) into memory")
     try:
-        source = xr.open_dataset(source_path, chunks={"time": 1})
-    except (ImportError, ValueError):
-        source = xr.open_dataset(source_path)
-    if precipitation_variable not in source:
-        source.close()
-        raise KeyError(
-            f"Rainfall source is missing selected variable {precipitation_variable!r}."
+        try:
+            source = xr.open_dataset(source_path, chunks={"time": 1})
+        except (ImportError, ValueError):
+            source = xr.open_dataset(source_path)
+        if precipitation_variable not in source:
+            raise KeyError(
+                f"Rainfall source is missing selected variable {precipitation_variable!r}."
+            )
+        event = source[[precipitation_variable]].sel(
+            time=slice(start + pd.Timedelta(hours=1), end)
         )
-    event = source[[precipitation_variable]].sel(
-        time=slice(start + pd.Timedelta(hours=1), end)
+        if event.sizes.get("time", 0) != expected_hours:
+            raise ValueError(
+                f"Rainfall has {event.sizes.get('time', 0)} records; "
+                f"expected {expected_hours}."
+            )
+        event.attrs.update(
+            event_start_utc=str(start), event_end_utc=str(end),
+            interval_semantics="hourly accumulation ending at timestamp",
+        )
+        event.load()
+        event_subset_path = Path(event_subset_path)
+        event_subset_path.parent.mkdir(parents=True, exist_ok=True)
+        event.to_netcdf(
+            event_subset_path,
+            encoding={
+                precipitation_variable: {
+                    "zlib": True, "complevel": 4, "shuffle": True,
+                }
+            },
+        )
+        source_crs, x_name, y_name = _source_grid(event)
+        src_x = np.asarray(event[x_name], dtype=float).copy()
+        src_y = np.asarray(event[y_name], dtype=float).copy()
+        event_values = np.asarray(event[precipitation_variable], dtype=float).copy()
+        event_times = np.asarray(event.time.values).copy()
+    finally:
+        if event is not None:
+            event.close()
+        if source is not None:
+            source.close()
+    _rainfall_progress(
+        "saved the unchanged event subset and closed all source NetCDF handles"
     )
-    if event.sizes.get("time", 0) != expected_hours:
-        source.close()
-        raise ValueError(f"Rainfall has {event.sizes.get('time', 0)} records; expected {expected_hours}.")
-    event.attrs.update(
-        event_start_utc=str(start), event_end_utc=str(end),
-        interval_semantics="hourly accumulation ending at timestamp",
-    )
-    event_subset_path = Path(event_subset_path)
-    event_subset_path.parent.mkdir(parents=True, exist_ok=True)
-    event.to_netcdf(
-        event_subset_path,
-        encoding={precipitation_variable: {"zlib": True, "complevel": 4, "shuffle": True}},
-    )
-    source_crs, x_name, y_name = _source_grid(event)
-    src_x, src_y = np.asarray(event[x_name], float), np.asarray(event[y_name], float)
     dx, dy = abs(float(np.median(np.diff(src_x)))), abs(float(np.median(np.diff(src_y))))
     src_transform = from_origin(src_x.min() - dx / 2, src_y.max() + dy / 2, dx, dy)
     dst_transform = from_origin(grid.xmin, grid.ymax, grid.resolution, grid.resolution)
@@ -1008,90 +1111,109 @@ def prepare_aorc_event(
     incomplete_records: list[dict[str, object]] = []
     hdf5_path = Path(hdf5_path)
     hdf5_path.parent.mkdir(parents=True, exist_ok=True)
-    with h5py.File(hdf5_path, "w") as h5:
-        h5.create_dataset("time [s]", data=times_s)
-        group = h5.create_group("precipitation rain [m s^-1]")
-        for index in range(expected_hours):
-            source_mm = np.asarray(
-                event[precipitation_variable].isel(time=index), dtype=float
-            )
-            if np.any(source_mm[np.isfinite(source_mm)] < 0):
-                if coverage_report_path is not None:
-                    report_path = Path(coverage_report_path)
-                    report_path.parent.mkdir(parents=True, exist_ok=True)
-                    report_path.write_text(json.dumps({
-                        "schema": "riftprep-rainfall-coverage-v2",
-                        "status": "FAILED",
-                        "failure": f"negative precipitation in record {index}",
-                        "raw_native_modified": False,
-                        "saved_event_subset_modified": False,
-                    }, indent=2), encoding="utf-8")
-                source.close()
-                event.close()
-                raise ValueError(
-                    f"Rainfall record {index} contains negative precipitation. "
-                    "No automatic clipping was performed."
+    staging_directory = Path(tempfile.mkdtemp(
+        prefix="riftprep-rainfall-", dir=_rainfall_staging_root()
+    ))
+    staged_hdf5 = staging_directory / hdf5_path.name
+    _rainfall_progress(f"writing staged RIFT HDF5 at {staged_hdf5}")
+    try:
+        with h5py.File(staged_hdf5, "w") as h5:
+            h5.create_dataset("time [s]", data=times_s)
+            group = h5.create_group("precipitation rain [m s^-1]")
+            for index in range(expected_hours):
+                _rainfall_progress(
+                    f"mapping rainfall record {index + 1}/{expected_hours}"
                 )
-            if src_y[0] < src_y[-1]:
-                source_mm = source_mm[::-1, :]
-            if src_x[0] > src_x[-1]:
-                source_mm = source_mm[:, ::-1]
-            mapped_mm = np.full(grid.cell_shape, np.nan, dtype=np.float64)
-            reproject(
-                source=source_mm, destination=mapped_mm,
-                src_transform=src_transform, src_crs=source_crs, src_nodata=np.nan,
-                dst_transform=dst_transform, dst_crs=grid.crs, dst_nodata=np.nan,
-                resampling=Resampling.average,
-            )
-            missing_mask = cell_mask & ~np.isfinite(mapped_mm)
-            missing = int(np.count_nonzero(missing_mask))
-            if missing:
-                replacement_union |= missing_mask
-                incomplete_records.append({
-                    "record_index": index,
-                    "time_utc": str(pd.Timestamp(event.time.values[index], tz="UTC")),
-                    "missing_active_cells": missing,
-                })
-                if uncovered_policy == "error":
+                source_mm = event_values[index]
+                if np.any(source_mm[np.isfinite(source_mm)] < 0):
                     if coverage_report_path is not None:
                         report_path = Path(coverage_report_path)
-                        map_path = report_path.with_name("rainfall_coverage_map.png")
-                        _write_rainfall_coverage_map(
-                            cell_mask, replacement_union, grid, map_path,
-                            int(np.count_nonzero(replacement_union)),
-                        )
                         report_path.parent.mkdir(parents=True, exist_ok=True)
                         report_path.write_text(json.dumps({
                             "schema": "riftprep-rainfall-coverage-v2",
-                            "status": "NEEDS USER INPUT",
-                            "uncovered_policy": uncovered_policy,
+                            "status": "FAILED",
+                            "failure": f"negative precipitation in record {index}",
                             "raw_native_modified": False,
                             "saved_event_subset_modified": False,
-                            "coverage_map": str(map_path),
-                            "incomplete_records": incomplete_records,
                         }, indent=2), encoding="utf-8")
-                    source.close()
-                    event.close()
-                    diagnostic = (
-                        f" Inspect {coverage_report_path}." if coverage_report_path else ""
-                    )
                     raise ValueError(
-                        f"Rainfall does not cover {missing} active RIFT cells."
-                        f"{diagnostic} No automatic fill was performed; provide complete "
-                        "user-modified rainfall forcing or select uncovered_policy='zero'."
+                        f"Rainfall record {index} contains negative precipitation. "
+                        "No automatic clipping was performed."
                     )
-                # Keep the saved native/event NetCDF unchanged.  Only the numeric
-                # RIFT field is completed: outside source coverage means no applied
-                # precipitation, so those cells receive exactly zero.
-                mapped_mm[missing_mask] = 0.0
-            mapped_mm = np.where(cell_mask, mapped_mm, 0.0)
-            rate = mapped_mm * 1e-3 / 3600.0
-            group.create_dataset(str(index), data=rate, compression="gzip", shuffle=True)
-            active = mapped_mm[cell_mask]
-            mean_rate.append(float(active.mean()))
-            max_rate.append(float(active.max()))
-            accumulation_mm += mapped_mm
-        group.create_dataset(str(expected_hours), data=np.zeros(grid.cell_shape), compression="gzip", shuffle=True)
+                if src_y[0] < src_y[-1]:
+                    source_mm = source_mm[::-1, :]
+                if src_x[0] > src_x[-1]:
+                    source_mm = source_mm[:, ::-1]
+                mapped_mm = np.full(grid.cell_shape, np.nan, dtype=np.float64)
+                reproject(
+                    source=source_mm, destination=mapped_mm,
+                    src_transform=src_transform, src_crs=source_crs, src_nodata=np.nan,
+                    dst_transform=dst_transform, dst_crs=grid.crs, dst_nodata=np.nan,
+                    resampling=Resampling.average,
+                )
+                missing_mask = cell_mask & ~np.isfinite(mapped_mm)
+                missing = int(np.count_nonzero(missing_mask))
+                if missing:
+                    replacement_union |= missing_mask
+                    incomplete_records.append({
+                        "record_index": index,
+                        "time_utc": str(pd.Timestamp(event_times[index], tz="UTC")),
+                        "missing_active_cells": missing,
+                    })
+                    if uncovered_policy == "error":
+                        if coverage_report_path is not None:
+                            report_path = Path(coverage_report_path)
+                            map_path = report_path.with_name("rainfall_coverage_map.png")
+                            _write_rainfall_coverage_map(
+                                cell_mask, replacement_union, grid, map_path,
+                                int(np.count_nonzero(replacement_union)),
+                            )
+                            report_path.parent.mkdir(parents=True, exist_ok=True)
+                            report_path.write_text(json.dumps({
+                                "schema": "riftprep-rainfall-coverage-v2",
+                                "status": "NEEDS USER INPUT",
+                                "uncovered_policy": uncovered_policy,
+                                "raw_native_modified": False,
+                                "saved_event_subset_modified": False,
+                                "coverage_map": str(map_path),
+                                "incomplete_records": incomplete_records,
+                            }, indent=2), encoding="utf-8")
+                        diagnostic = (
+                            f" Inspect {coverage_report_path}."
+                            if coverage_report_path else ""
+                        )
+                        raise ValueError(
+                            f"Rainfall does not cover {missing} active RIFT cells."
+                            f"{diagnostic} No automatic fill was performed; provide "
+                            "complete user-modified rainfall forcing or select "
+                            "uncovered_policy='zero'."
+                        )
+                    # Keep the saved native/event NetCDF unchanged. Only the numeric
+                    # RIFT field is completed: outside source coverage means no applied
+                    # precipitation, so those cells receive exactly zero.
+                    mapped_mm[missing_mask] = 0.0
+                mapped_mm = np.where(cell_mask, mapped_mm, 0.0)
+                rate = mapped_mm * 1e-3 / 3600.0
+                group.create_dataset(
+                    str(index), data=rate, compression="gzip", shuffle=True
+                )
+                active = mapped_mm[cell_mask]
+                mean_rate.append(float(active.mean()))
+                max_rate.append(float(active.max()))
+                accumulation_mm += mapped_mm
+            group.create_dataset(
+                str(expected_hours), shape=grid.cell_shape, dtype="float64",
+                compression="gzip", shuffle=True, fillvalue=0.0,
+            )
+        _rainfall_progress("reopening and validating the complete staged HDF5")
+        _validate_staged_rainfall_hdf5(
+            staged_hdf5, times_s, expected_hours, grid.cell_shape
+        )
+        _rainfall_progress("publishing the validated HDF5 to the case directory")
+        _publish_staged_file(staged_hdf5, hdf5_path)
+        _rainfall_progress(f"published {hdf5_path}")
+    finally:
+        shutil.rmtree(staging_directory, ignore_errors=True)
     if coverage_report_path is not None:
         report_path = Path(coverage_report_path)
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1152,8 +1274,6 @@ def prepare_aorc_event(
             "rift_hdf5_uncovered_value_mm_h": 0.0,
             "complete": True,
         }, indent=2), encoding="utf-8")
-    source.close()
-    event.close()
     summary = pd.DataFrame({
         "time_utc": pd.date_range(start, periods=expected_hours, freq="1h", tz="UTC"),
         "mean_mm_h": mean_rate, "maximum_mm_h": max_rate,
