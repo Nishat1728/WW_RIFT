@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: >-
+  If you use RIFT Input Builder in research, please cite this software and the
+  original data products selected by your case provenance report.
+title: RIFT Input Builder
+type: software
+version: 0.3.0
+date-released: 2026-10-07
+authors:
+  - name: RIFT Input Builder contributors
+license: BSD-3-Clause
+abstract: >-
+  A raw-first, provenance-preserving notebook and Python package for preparing
+  simulation-ready terrain, land-cover, soil, rainfall, and boundary inputs for RIFT.
+keywords:
+  - RIFT
+  - hydrology
+  - flood modeling
+  - geospatial preprocessing

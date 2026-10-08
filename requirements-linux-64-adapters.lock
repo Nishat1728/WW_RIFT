@@ -1,0 +1,38 @@
+# Supplemental packages layered onto environment-linux-64.lock.
+# Versions reflect the Storrs adapter smoke environment on 2026-10-07.
+attrs==26.1.0
+beautifulsoup4==4.15.0
+cattrs==26.2.1
+cdsapi==0.7.7
+certifi==2026.7.22
+cffi==2.1.1
+cfgrib==0.9.15.1
+charset_normalizer==3.5.2
+click==8.5.0
+eccodes==2.49.0
+eccodeslib==2.49.0.30
+eckitlib==2.3.0.30
+ecmwf_datastores_client==0.5.3
+findlibs==0.1.3
+idna==3.20
+jinja2==3.1.6
+lxml==6.1.3
+markupsafe==3.0.4
+multiurl==0.3.9
+numpy==2.5.3
+platformdirs==4.12.3
+pycparser==3.0
+pydap==3.5.11
+python_dateutil==2.9.0.post0
+pytz==2026.5
+requests==2.34.2
+requests_cache==1.3.3
+scipy==1.18.1
+six==1.17.0
+soupsieve==2.10
+tqdm==4.70.1
+typing_extensions==4.16.0
+urllib3==2.8.0
+url_normalize==3.0.1
+webob==1.8.11
+watershed-workflow @ git+https://github.com/environmental-modeling-workflows/watershed-workflow.git@42add4abd3b57838b3193059bf0aa53e5814fa71

@@ -1,0 +1,38 @@
+name: riftprep
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - jupyterlab
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - geopandas
+  - rasterio
+  - shapely>=2
+  - pyproj
+  - requests
+  - h5py
+  - xarray
+  - netcdf4
+  - dask
+  - pyyaml
+  - ipywidgets
+  - contextily
+  - cdsapi
+  - cfgrib
+  - eccodes
+  - pydap
+  - pyogrio
+  - watershed-workflow
+  - pytest
+  - pip
+  - pip:
+      - py3dep
+      - pynhd
+      - pygeohydro
+      - dataretrieval
+      - herbie-data
+      - earthaccess
+      - -e .

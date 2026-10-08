@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+.coverage
+htmlcov/
+.DS_Store
+.testdeps/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Workflow outputs are reproducible and must not be committed.
+cases/
+validation_runs/
+raw/
+processed/
+rift_inputs/
+figures/
+quality_control/
+results/
+*.log
+
+# Local packaging and benchmark artifacts.
+*.tar.gz
+executed_notebooks/
+benchmark_results/
+matrix_configs/
+generated_configs/
+slurm-*.out
+release-check-*.out
+source-smoke-*.out

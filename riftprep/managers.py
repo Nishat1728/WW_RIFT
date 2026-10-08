@@ -1,0 +1,1585 @@
+"""Raw-first source managers patterned after Watershed Workflow managers.
+
+Every adapter returns files in ``raw/``.  No RIFT-grid interpolation happens in
+this module; source resolution and model resolution are intentionally separate.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from threading import Lock
+from typing import Any, Iterable
+from urllib.parse import urljoin
+
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import rasterio
+import requests
+import xarray as xr
+from rasterio.enums import Resampling
+from rasterio.merge import merge as merge_rasters
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from rasterio.transform import from_origin
+from shapely.geometry import box
+
+from .artifacts import ProvenanceLedger
+from .config import ProjectPaths
+from .providers import get_huc_boundary, get_usgs_3dhp_flowlines, load_vector
+from .source_adapters import (
+    download_copernicus_glo30,
+    download_daymet_hourly,
+    download_era5_land_hourly,
+    download_mrms_hourly,
+    download_soilgrids_hydraulic,
+)
+from .spec import CaseSpec, ProductSpec
+
+
+@contextmanager
+def _requests_post_timeout(seconds: float):
+    """Give third-party adapters a bounded POST timeout when they omit one.
+
+    Watershed Workflow's NRCS adapter calls ``requests.post()`` directly
+    without a timeout. Soil tiles are downloaded concurrently, so patch the
+    shared function once around the whole tile pool instead of racing a patch
+    in each worker.
+    """
+    original_post = requests.post
+
+    def post_with_timeout(*args, **kwargs):
+        kwargs.setdefault("timeout", seconds)
+        return original_post(*args, **kwargs)
+
+    requests.post = post_with_timeout
+    try:
+        yield
+    finally:
+        requests.post = original_post
+
+
+@dataclass
+class RawProduct:
+    name: str
+    provider: str
+    files: dict[str, Path] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RawCatalog:
+    boundary: gpd.GeoDataFrame
+    products: dict[str, RawProduct]
+
+    def require(self, name: str) -> RawProduct:
+        try:
+            return self.products[name]
+        except KeyError as error:
+            raise KeyError(f"Raw product {name!r} was not acquired.") from error
+
+
+def _ww_sources():
+    """Import lazily so local-only workflows do not require Watershed Workflow."""
+    try:
+        from watershed_workflow.sources.manager_3dep import Manager3DEP
+        from watershed_workflow.sources.manager_aorc import ManagerAORC
+        from watershed_workflow.sources.manager_nlcd import ManagerNLCD
+        from watershed_workflow.sources.manager_nrcs import ManagerNRCS
+        from watershed_workflow.utils.config import setDataDirectory
+    except ImportError as error:
+        raise ImportError(
+            "This provider needs Watershed Workflow. Install the optional "
+            "'watershed-workflow' dependency or select a local provider."
+        ) from error
+    return Manager3DEP, ManagerAORC, ManagerNLCD, ManagerNRCS, setDataDirectory
+
+
+def resolve_boundary(spec: CaseSpec, paths: ProjectPaths, ledger: ProvenanceLedger) -> gpd.GeoDataFrame:
+    raw_dir = paths.raw / "boundary"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    domain = spec.domain
+    path = raw_dir / "selected_domain.gpkg"
+    if spec.cache.mode == "reuse" and path.is_file():
+        boundary = gpd.read_file(path)
+        provider = {
+            "huc": "usgs_wbd",
+            "shapefile": "local_vector",
+            "rectangle": "user_rectangle",
+        }[domain.mode]
+    elif domain.mode == "huc":
+        boundary = get_huc_boundary(str(domain.huc_code), domain.huc_level)
+        provider = "usgs_wbd"
+    elif domain.mode == "shapefile":
+        boundary = load_vector(domain.vector_path, layer=domain.vector_layer)
+        provider = "local_vector"
+    else:
+        boundary = gpd.GeoDataFrame(
+            {"domain_id": [spec.case_name]},
+            geometry=[box(*domain.bounds)],
+            crs=domain.bounds_crs,
+        )
+        provider = "user_rectangle"
+    if not (spec.cache.mode == "reuse" and path.is_file()):
+        boundary.to_file(path, driver="GPKG")
+    ledger.register("boundary", provider, path, {"mode": domain.mode})
+    return boundary
+
+
+def _copy_local(source: str | Path, destination: Path) -> Path:
+    source = Path(source).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return destination
+
+
+def _xy_names(data: xr.DataArray) -> tuple[str, str]:
+    candidates = (("x", "y"), ("longitude", "latitude"), ("lon", "lat"))
+    for x_name, y_name in candidates:
+        if x_name in data.coords and y_name in data.coords:
+            return x_name, y_name
+    raise ValueError(f"Cannot identify horizontal coordinates in {list(data.coords)}")
+
+
+def dataset_variable_to_geotiff(
+    dataset: xr.Dataset,
+    variable: str,
+    destination: str | Path,
+    fallback_crs: str,
+    nodata: float = -9999.0,
+    invalid_dimension_constant: float | None = None,
+) -> Path:
+    """Export one native, regularly gridded source variable without resampling."""
+    data = dataset[variable].squeeze(drop=True)
+    x_name, y_name = _xy_names(data)
+    if data.ndim != 2:
+        if invalid_dimension_constant is None:
+            raise ValueError(
+                f"{variable} must be 2-D after squeeze; got dimensions {data.dims} "
+                f"with sizes {dict(data.sizes)}. No automatic correction was made. "
+                f"After reviewing the source, either set "
+                f"land_cover.options.manual_dimension_constants.{variable} explicitly "
+                "or provide user-modified rasters with land_cover.provider='local'."
+            )
+        constant = float(invalid_dimension_constant)
+        if not np.isfinite(constant):
+            raise ValueError(f"Manual {variable} dimension constant must be finite.")
+        if variable == "cover" and (not constant.is_integer() or not 0 <= constant <= 255):
+            raise ValueError("Manual cover dimension constant must be an integer from 0 to 255.")
+        if variable in {"impervious", "canopy"} and not 0 <= constant <= 100:
+            raise ValueError(
+                f"Manual {variable} dimension constant must be between 0 and 100 percent."
+            )
+        values = np.full(
+            (int(data.sizes[y_name]), int(data.sizes[x_name])), constant, dtype=np.float32
+        )
+    else:
+        data = data.transpose(y_name, x_name)
+        values = np.asarray(data)
+    x = np.asarray(data[x_name], dtype=float)
+    y = np.asarray(data[y_name], dtype=float)
+    if x.size < 2 or y.size < 2:
+        raise ValueError(f"{variable} has insufficient spatial coordinates.")
+    dx = float(np.median(np.diff(x)))
+    dy = float(np.median(np.diff(y)))
+    if dx < 0:
+        x, values, dx = x[::-1], values[:, ::-1], -dx
+    if dy > 0:
+        y, values, dy = y[::-1], values[::-1, :], -dy
+    crs = fallback_crs
+    try:
+        if data.rio.crs is not None:
+            crs = data.rio.crs
+    except (AttributeError, ImportError):
+        pass
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    profile = {
+        "driver": "GTiff",
+        "height": values.shape[0],
+        "width": values.shape[1],
+        "count": 1,
+        "dtype": str(values.dtype),
+        "crs": crs,
+        "transform": from_origin(x[0] - dx / 2, y[0] + abs(dy) / 2, dx, abs(dy)),
+        "nodata": nodata,
+        "compress": "deflate",
+        "tiled": values.shape[0] >= 16 and values.shape[1] >= 16,
+    }
+    with rasterio.open(destination, "w", **profile) as output:
+        output.write(np.where(np.isfinite(values), values, nodata), 1)
+    return destination
+
+
+def _save_dataset(dataset: xr.Dataset, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dataset.to_netcdf(path)
+    return path
+
+
+def _plot_native_raster(path: Path, destination: Path, title: str, label: str, dpi: int) -> Path:
+    with rasterio.open(path) as source:
+        factor = max(1, int(max(source.height, source.width) / 2500))
+        data = source.read(1, out_shape=(max(1, source.height // factor), max(1, source.width // factor)))
+        if source.nodata is not None:
+            data = np.where(np.isclose(data, source.nodata), np.nan, data)
+        bounds = source.bounds
+    fig, ax = plt.subplots(figsize=(7.2, 5.2), constrained_layout=True)
+    image = ax.imshow(
+        data,
+        extent=(bounds.left, bounds.right, bounds.bottom, bounds.top),
+        origin="upper",
+        cmap="terrain" if "elevation" in label.lower() else "viridis",
+    )
+    ax.set(title=title, xlabel="Source x coordinate", ylabel="Source y coordinate", aspect="equal")
+    fig.colorbar(image, ax=ax, label=label)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(destination, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return destination
+
+
+def fetch_dem(
+    product: ProductSpec,
+    boundary: gpd.GeoDataFrame,
+    paths: ProjectPaths,
+    ledger: ProvenanceLedger,
+    plot: bool,
+    dpi: int,
+    reuse_existing: bool = False,
+) -> RawProduct:
+    raw_dir = paths.raw / "dem"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    files: dict[str, Path] = {}
+    if product.provider == "watershed_workflow_3dep":
+        resolution = int(product.options.get("resolution_m", 30))
+        tile_degrees = float(product.options.get("tile_degrees", 1.0))
+        max_attempts = max(1, int(product.options.get("max_attempts", 5)))
+        if tile_degrees <= 0:
+            raise ValueError("dem.options.tile_degrees must be positive.")
+        nc_path = raw_dir / f"3dep_{resolution}m_native.nc"
+        raster_path = raw_dir / f"3dep_{resolution}m_native.tif"
+        if reuse_existing and nc_path.is_file() and raster_path.is_file():
+            files.update(netcdf=nc_path, raster=raster_path)
+            with xr.open_dataset(nc_path) as dataset:
+                variable = next(iter(dataset.data_vars))
+            tile_count = int(product.options.get("cached_tile_count", 1))
+        else:
+            Manager3DEP, _, _, _, set_data_directory = _ww_sources()
+            set_data_directory(str(paths.provider_cache / "dem"))
+
+            def get_dataset(geometry):
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        manager = Manager3DEP(resolution)
+                        return manager.getDataset(geometry, variables=["DEM"])
+                    except Exception as error:
+                        retryable = (
+                            isinstance(error, (requests.RequestException, TimeoutError))
+                            or type(error).__name__ == "ServiceUnavailableError"
+                            or "service is currently not available" in str(error).lower()
+                        )
+                        if not retryable or attempt == max_attempts:
+                            raise
+                        time.sleep(min(30.0, 3.0 * 2 ** (attempt - 1)))
+                raise AssertionError("unreachable")
+
+            query = boundary.to_crs("EPSG:4326")
+            xmin, ymin, xmax, ymax = query.total_bounds
+            if max(xmax - xmin, ymax - ymin) <= tile_degrees:
+                dataset = get_dataset(query)
+                variable = next(iter(dataset.data_vars))
+                files["netcdf"] = _save_dataset(dataset, nc_path)
+                files["raster"] = dataset_variable_to_geotiff(
+                    dataset, variable, raster_path, "EPSG:5070"
+                )
+                dataset.close()
+                tile_count = 1
+            else:
+                domain = query.geometry.union_all()
+                tile_dir = raw_dir / "tiles"
+                tile_dir.mkdir(parents=True, exist_ok=True)
+                tile_rasters: list[Path] = []
+                tile_count = 0
+                for x0 in np.arange(xmin, xmax, tile_degrees):
+                    for y0 in np.arange(ymin, ymax, tile_degrees):
+                        clipped = domain.intersection(
+                            box(
+                                float(x0), float(y0),
+                                float(min(x0 + tile_degrees, xmax)),
+                                float(min(y0 + tile_degrees, ymax)),
+                            )
+                        )
+                        if clipped.is_empty:
+                            continue
+                        tile_count += 1
+                        tile = gpd.GeoDataFrame(
+                            {"tile": [tile_count]}, geometry=[clipped], crs="EPSG:4326"
+                        )
+                        dataset = get_dataset(tile)
+                        variable = next(iter(dataset.data_vars))
+                        tile_nc = tile_dir / f"3dep_{resolution}m_tile_{tile_count:04d}.nc"
+                        tile_tif = tile_dir / f"3dep_{resolution}m_tile_{tile_count:04d}.tif"
+                        files[f"tile_netcdf_{tile_count:04d}"] = _save_dataset(
+                            dataset, tile_nc
+                        )
+                        files[f"tile_raster_{tile_count:04d}"] = dataset_variable_to_geotiff(
+                            dataset, variable, tile_tif, "EPSG:5070"
+                        )
+                        tile_rasters.append(tile_tif)
+                        dataset.close()
+                if not tile_rasters:
+                    raise LookupError("3DEP returned no DEM tiles for the selected domain.")
+                sources = [rasterio.open(path) for path in tile_rasters]
+                try:
+                    mosaic, transform = merge_rasters(
+                        sources,
+                        res=(float(resolution), float(resolution)),
+                        nodata=-9999.0,
+                        target_aligned_pixels=True,
+                        resampling=Resampling.bilinear,
+                    )
+                    profile = sources[0].profile.copy()
+                finally:
+                    for source in sources:
+                        source.close()
+                values = mosaic[0].astype(np.float32, copy=False)
+                profile.update(
+                    driver="GTiff", height=values.shape[0], width=values.shape[1],
+                    count=1, dtype="float32", transform=transform,
+                    nodata=-9999.0, compress="deflate",
+                    tiled=values.shape[0] >= 16 and values.shape[1] >= 16,
+                )
+                with rasterio.open(raster_path, "w", **profile) as output:
+                    output.write(values, 1)
+                x = transform.c + (np.arange(values.shape[1]) + 0.5) * transform.a
+                y = transform.f + (np.arange(values.shape[0]) + 0.5) * transform.e
+                mosaic_dataset = xr.Dataset(
+                    {"dem": (("y", "x"), values)}, coords={"x": x, "y": y},
+                    attrs={
+                        "product": f"3DEP {resolution}m DEM",
+                        "source": "py3dep TNM tiled native-product mosaic",
+                    },
+                )
+                files["netcdf"] = _save_dataset(mosaic_dataset, nc_path)
+                files["raster"] = raster_path
+                mosaic_dataset.close()
+                del mosaic, values
+        metadata = {
+            "resolution_m": resolution, "variable": variable,
+            "tile_degrees": tile_degrees, "tile_count": tile_count,
+            "max_attempts": max_attempts,
+        }
+    elif product.provider == "copernicus_glo30":
+        files, metadata = download_copernicus_glo30(
+            boundary,
+            raw_dir,
+            reuse_existing=reuse_existing,
+            max_attempts=int(product.options.get("max_attempts", 5)),
+        )
+    elif product.provider == "local":
+        source = product.options["path"]
+        files["raster"] = _copy_local(source, raw_dir / Path(source).name)
+        metadata = {"source_path": str(Path(source).expanduser().resolve())}
+    else:
+        raise ValueError(f"Unsupported DEM provider: {product.provider}")
+    for path in files.values():
+        ledger.register("dem", product.provider, path, product.options)
+    if plot:
+        resolution_text = f" ({metadata['resolution_m']} m product)" if "resolution_m" in metadata else ""
+        files["plot"] = _plot_native_raster(
+            files["raster"],
+            paths.figures / "raw_dem_selected_product.png",
+            f"Selected raw DEM{resolution_text}",
+            "Elevation (m)",
+            dpi,
+        )
+    return RawProduct("dem", product.provider, files, metadata)
+
+
+def fetch_land_cover(
+    product: ProductSpec,
+    boundary: gpd.GeoDataFrame,
+    paths: ProjectPaths,
+    ledger: ProvenanceLedger,
+    plot: bool,
+    dpi: int,
+    reuse_existing: bool = False,
+) -> RawProduct:
+    raw_dir = paths.raw / "land_cover"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    files: dict[str, Path] = {}
+    if product.provider == "watershed_workflow_nlcd":
+        year = int(product.options.get("year", 2021))
+        location = str(product.options.get("location", "L48"))
+        variables = list(product.options.get("variables", ["cover", "impervious", "canopy"]))
+        manual_dimension_constants = dict(
+            product.options.get("manual_dimension_constants", {})
+        )
+        unknown_manual_variables = set(manual_dimension_constants) - set(variables)
+        if unknown_manual_variables:
+            raise ValueError(
+                "land_cover.options.manual_dimension_constants contains unselected variables: "
+                f"{sorted(unknown_manual_variables)}"
+            )
+        tile_degrees = float(product.options.get("tile_degrees", 1.0))
+        tile_overlap_degrees = float(product.options.get("tile_overlap_degrees", 0.02))
+        workers = max(1, int(product.options.get("download_workers", 4)))
+        max_attempts = max(1, int(product.options.get("max_attempts", 5)))
+        if tile_degrees <= 0:
+            raise ValueError("land_cover.options.tile_degrees must be positive.")
+        if tile_overlap_degrees < 0 or tile_overlap_degrees >= tile_degrees / 2:
+            raise ValueError(
+                "land_cover.options.tile_overlap_degrees must be nonnegative and "
+                "smaller than half tile_degrees."
+            )
+        nc_path = raw_dir / f"nlcd_{location}_{year}_native.nc"
+        raster_paths = {var: raw_dir / f"nlcd_{var}_{year}_native.tif" for var in variables}
+        if reuse_existing and nc_path.is_file() and all(path.is_file() for path in raster_paths.values()):
+            files = {"netcdf": nc_path, **raster_paths}
+            tile_count = int(product.options.get("cached_tile_count", 1))
+        else:
+            _, _, ManagerNLCD, _, set_data_directory = _ww_sources()
+            set_data_directory(str(paths.provider_cache / "land_cover"))
+            # pygeohydro/async-retriever uses a shared SQLite HTTP cache.  Concurrent
+            # ManagerNLCD calls can contend for that database on large tiled domains
+            # and fail with ``sqlite3.OperationalError: database is locked``.  Keep
+            # provider access serial while allowing tile serialization/conversion to
+            # proceed in worker threads after each download completes.
+            provider_download_lock = Lock()
+
+            def get_dataset(geometry):
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        with provider_download_lock:
+                            return ManagerNLCD(location=location, year=year).getDataset(
+                                geometry, variables=variables
+                            )
+                    except Exception as error:
+                        message = str(error).lower()
+                        retryable = (
+                            isinstance(error, (requests.RequestException, TimeoutError, OSError))
+                            or type(error).__name__ == "ServiceUnavailableError"
+                            or any(marker in message for marker in (
+                                "service is currently not available", "temporarily unavailable",
+                                "timed out", "timeout", "connection reset", "connection aborted",
+                                "database is locked", "502", "503", "504",
+                            ))
+                        )
+                        if not retryable or attempt == max_attempts:
+                            raise
+                        time.sleep(min(30.0, 3.0 * 2 ** (attempt - 1)))
+                raise AssertionError("unreachable")
+
+            query = boundary.to_crs("EPSG:4326")
+            xmin, ymin, xmax, ymax = query.total_bounds
+            if max(xmax - xmin, ymax - ymin) <= tile_degrees:
+                dataset = get_dataset(query)
+                files["netcdf"] = _save_dataset(dataset, nc_path)
+                for variable in variables:
+                    files[variable] = dataset_variable_to_geotiff(
+                        dataset, variable, raster_paths[variable], "EPSG:4326",
+                        invalid_dimension_constant=manual_dimension_constants.get(variable),
+                    )
+                dataset.close()
+                tile_count = 1
+            else:
+                domain = query.geometry.union_all()
+                tile_queries: list[tuple[int, gpd.GeoDataFrame]] = []
+                for x0 in np.arange(xmin, xmax, tile_degrees):
+                    for y0 in np.arange(ymin, ymax, tile_degrees):
+                        clipped = domain.intersection(
+                            box(
+                                float(max(xmin, x0 - tile_overlap_degrees)),
+                                float(max(ymin, y0 - tile_overlap_degrees)),
+                                float(min(x0 + tile_degrees + tile_overlap_degrees, xmax)),
+                                float(min(y0 + tile_degrees + tile_overlap_degrees, ymax)),
+                            )
+                        )
+                        if clipped.is_empty:
+                            continue
+                        index = len(tile_queries) + 1
+                        tile_queries.append((
+                            index,
+                            gpd.GeoDataFrame(
+                                {"tile": [index]}, geometry=[clipped], crs="EPSG:4326"
+                            ),
+                        ))
+                tile_count = len(tile_queries)
+                tile_dir = raw_dir / "tiles"
+                tile_dir.mkdir(parents=True, exist_ok=True)
+
+                def download_tile(item):
+                    index, tile = item
+                    dataset = get_dataset(tile)
+                    tile_files: dict[str, Path] = {}
+                    try:
+                        tile_nc = tile_dir / f"nlcd_{location}_{year}_tile_{index:04d}.nc"
+                        tile_files["netcdf"] = _save_dataset(dataset, tile_nc)
+                        for variable in variables:
+                            tile_tif = tile_dir / f"nlcd_{variable}_{year}_tile_{index:04d}.tif"
+                            tile_files[variable] = dataset_variable_to_geotiff(
+                                dataset, variable, tile_tif, "EPSG:4326",
+                                invalid_dimension_constant=manual_dimension_constants.get(variable),
+                            )
+                    finally:
+                        dataset.close()
+                    return index, tile_files
+
+                tile_results: dict[int, dict[str, Path]] = {}
+                with ThreadPoolExecutor(max_workers=min(workers, tile_count)) as executor:
+                    futures = [executor.submit(download_tile, item) for item in tile_queries]
+                    for future in as_completed(futures):
+                        index, tile_files = future.result()
+                        tile_results[index] = tile_files
+
+                tile_rasters: dict[str, list[Path]] = {variable: [] for variable in variables}
+                for index in sorted(tile_results):
+                    for artifact, path in tile_results[index].items():
+                        files[f"tile_{index:04d}_{artifact}"] = path
+                        if artifact in tile_rasters:
+                            tile_rasters[artifact].append(path)
+
+                mosaic_variables: dict[str, tuple[tuple[str, str], np.ndarray]] = {}
+                common_transform = None
+                common_shape = None
+                for variable in variables:
+                    sources = [rasterio.open(path) for path in tile_rasters[variable]]
+                    try:
+                        mosaic, transform = merge_rasters(
+                            sources,
+                            nodata=-9999.0,
+                            target_aligned_pixels=True,
+                            resampling=Resampling.nearest,
+                        )
+                        profile = sources[0].profile.copy()
+                    finally:
+                        for source in sources:
+                            source.close()
+                    values = mosaic[0]
+                    if common_transform is None:
+                        common_transform = transform
+                        common_shape = values.shape
+                    elif transform != common_transform or values.shape != common_shape:
+                        raise RuntimeError("NLCD tile mosaics do not share one native grid.")
+                    profile.update(
+                        driver="GTiff", height=values.shape[0], width=values.shape[1],
+                        count=1, dtype=str(values.dtype), transform=transform,
+                        nodata=-9999.0, compress="deflate",
+                        tiled=values.shape[0] >= 16 and values.shape[1] >= 16,
+                    )
+                    with rasterio.open(raster_paths[variable], "w", **profile) as output:
+                        output.write(values, 1)
+                    files[variable] = raster_paths[variable]
+                    mosaic_variables[variable] = (("y", "x"), values)
+                    del mosaic
+
+                assert common_transform is not None and common_shape is not None
+                x = common_transform.c + (np.arange(common_shape[1]) + 0.5) * common_transform.a
+                y = common_transform.f + (np.arange(common_shape[0]) + 0.5) * common_transform.e
+                mosaic_dataset = xr.Dataset(
+                    mosaic_variables,
+                    coords={"x": x, "y": y},
+                    attrs={
+                        "product": f"NLCD {year} {location}",
+                        "source": "pygeohydro MRLC tiled native-product mosaic",
+                    },
+                )
+                files["netcdf"] = _save_dataset(mosaic_dataset, nc_path)
+                mosaic_dataset.close()
+        metadata = {
+            "year": year, "location": location, "variables": variables,
+            "tile_degrees": tile_degrees,
+            "tile_overlap_degrees": tile_overlap_degrees,
+            "tile_count": tile_count,
+            "download_workers": workers, "max_attempts": max_attempts,
+            "manual_dimension_constants": manual_dimension_constants,
+        }
+    elif product.provider == "local":
+        for variable, source in product.options["rasters"].items():
+            files[variable] = _copy_local(source, raw_dir / Path(source).name)
+        metadata = {"variables": sorted(product.options["rasters"])}
+    else:
+        raise ValueError(f"Unsupported land-cover provider: {product.provider}")
+    for key, path in files.items():
+        ledger.register("land_cover", product.provider, path, {**product.options, "artifact": key})
+    if plot and "cover" in files:
+        files["plot"] = _plot_native_raster(
+            files["cover"], paths.figures / "raw_land_cover_selected_product.png",
+            "Selected raw land-cover product", "Land-cover class", dpi,
+        )
+    return RawProduct("land_cover", product.provider, files, metadata)
+
+
+def fetch_soil(
+    product: ProductSpec,
+    boundary: gpd.GeoDataFrame,
+    paths: ProjectPaths,
+    ledger: ProvenanceLedger,
+    plot: bool,
+    dpi: int,
+    reuse_existing: bool = False,
+) -> RawProduct:
+    raw_dir = paths.raw / "soil"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    files: dict[str, Path] = {}
+    if product.provider == "watershed_workflow_ssurgo":
+        path = raw_dir / "ssurgo_native.gpkg"
+        tile_degrees = float(product.options.get("tile_degrees", 0.25))
+        workers = max(1, int(product.options.get("download_workers", 4)))
+        max_attempts = max(1, int(product.options.get("max_attempts", 5)))
+        request_timeout_seconds = float(
+            product.options.get("request_timeout_seconds", 120.0)
+        )
+        max_subdivision_depth = max(
+            0, int(product.options.get("max_subdivision_depth", 2))
+        )
+        if tile_degrees <= 0:
+            raise ValueError("soil.options.tile_degrees must be positive.")
+        if request_timeout_seconds <= 0:
+            raise ValueError("soil.options.request_timeout_seconds must be positive.")
+        tile_count = 1
+        tiles_with_soil = 1
+        terminal_empty_queries: list[list[float]] = []
+        if reuse_existing and path.is_file():
+            soil = gpd.read_file(path)
+            tile_count = int(product.options.get("cached_tile_count", 1))
+            tiles_with_soil = int(product.options.get("cached_tiles_with_soil", tile_count))
+        else:
+            _, _, _, ManagerNRCS, set_data_directory = _ww_sources()
+            set_data_directory(str(paths.provider_cache / "soil"))
+            query = boundary.to_crs("EPSG:4326")
+            xmin, ymin, xmax, ymax = query.total_bounds
+
+            def download_tile(
+                tile: gpd.GeoDataFrame, subdivision_depth: int = 0
+            ) -> gpd.GeoDataFrame:
+                last_error: Exception | None = None
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        manager = ManagerNRCS(force_download=not reuse_existing)
+                        return manager.getShapesByGeometry(tile)
+                    except Exception as error:
+                        last_error = error
+                        missing_table = (
+                            isinstance(error, KeyError) and error.args == ("Table",)
+                        )
+                        retryable = (
+                            isinstance(error, (requests.RequestException, TimeoutError))
+                            or missing_table
+                            or type(error).__name__ == "ServiceUnavailableError"
+                            or "service is currently not available" in str(error).lower()
+                        )
+                        if not retryable:
+                            raise
+                        # A missing Table commonly means this exact query is too
+                        # complex (or contains no mapped soil). Two retries are
+                        # enough before querying four exact sub-regions.
+                        if missing_table and attempt >= min(2, max_attempts):
+                            break
+                        if attempt == max_attempts:
+                            break
+                        time.sleep(min(30.0, 3.0 * 2 ** (attempt - 1)))
+
+                if subdivision_depth < max_subdivision_depth:
+                    geometry = tile.geometry.union_all()
+                    left, bottom, right, top = geometry.bounds
+                    xmid = (left + right) / 2.0
+                    ymid = (bottom + top) / 2.0
+                    children = []
+                    for child_box in (
+                        box(left, bottom, xmid, ymid),
+                        box(xmid, bottom, right, ymid),
+                        box(left, ymid, xmid, top),
+                        box(xmid, ymid, right, top),
+                    ):
+                        clipped = geometry.intersection(child_box)
+                        if not clipped.is_empty:
+                            children.append(
+                                gpd.GeoDataFrame(
+                                    {"subdivision_depth": [subdivision_depth + 1]},
+                                    geometry=[clipped], crs=tile.crs,
+                                )
+                            )
+                    child_results = [
+                        download_tile(child, subdivision_depth + 1)
+                        for child in children
+                    ]
+                    nonempty = [piece for piece in child_results if not piece.empty]
+                    if nonempty:
+                        combined = gpd.GeoDataFrame(
+                            pd.concat(nonempty, ignore_index=True), crs=nonempty[0].crs
+                        )
+                        if "mukey" in combined.columns:
+                            combined = combined.dissolve(
+                                by="mukey", as_index=False, aggfunc="first"
+                            )
+                        return combined
+                    return gpd.GeoDataFrame(
+                        {"mukey": pd.Series(dtype="int64")},
+                        geometry=gpd.GeoSeries([], crs=tile.crs),
+                        crs=tile.crs,
+                    )
+
+                # Only a repeatedly missing JSON Table at the smallest query
+                # scale is interpreted as a documented no-data response.
+                if isinstance(last_error, KeyError) and last_error.args == ("Table",):
+                    terminal_empty_queries.append(
+                        [float(value) for value in tile.total_bounds]
+                    )
+                    return gpd.GeoDataFrame(
+                        {"mukey": pd.Series(dtype="int64")},
+                        geometry=gpd.GeoSeries([], crs=tile.crs),
+                        crs=tile.crs,
+                    )
+                assert last_error is not None
+                raise last_error
+
+            with _requests_post_timeout(request_timeout_seconds):
+                if max(xmax - xmin, ymax - ymin) <= tile_degrees:
+                    soil = download_tile(query)
+                else:
+                    domain = query.geometry.union_all()
+                    tile_queries: list[tuple[int, gpd.GeoDataFrame]] = []
+                    x_edges = np.arange(xmin, xmax, tile_degrees)
+                    y_edges = np.arange(ymin, ymax, tile_degrees)
+                    for x0 in x_edges:
+                        for y0 in y_edges:
+                            clipped = domain.intersection(
+                                box(
+                                    float(x0), float(y0),
+                                    float(min(x0 + tile_degrees, xmax)),
+                                    float(min(y0 + tile_degrees, ymax)),
+                                )
+                            )
+                            if clipped.is_empty:
+                                continue
+                            index = len(tile_queries) + 1
+                            tile = gpd.GeoDataFrame(
+                                {"tile": [index]}, geometry=[clipped], crs="EPSG:4326"
+                            )
+                            tile_queries.append((index, tile))
+                    tile_count = len(tile_queries)
+                    tile_results: dict[int, gpd.GeoDataFrame] = {}
+                    with ThreadPoolExecutor(max_workers=min(workers, tile_count)) as executor:
+                        futures = {
+                            executor.submit(download_tile, tile): index
+                            for index, tile in tile_queries
+                        }
+                        for future in as_completed(futures):
+                            tile_results[futures[future]] = future.result()
+
+            if max(xmax - xmin, ymax - ymin) > tile_degrees:
+                tile_dir = raw_dir / "tiles"
+                tile_dir.mkdir(parents=True, exist_ok=True)
+                pieces = []
+                for index in sorted(tile_results):
+                    piece = tile_results[index]
+                    if not piece.empty:
+                        tile_path = tile_dir / f"ssurgo_tile_{index:04d}.gpkg"
+                        piece.to_file(tile_path, driver="GPKG")
+                        files[f"tile_{index:04d}"] = tile_path
+                        pieces.append(piece)
+                if not pieces:
+                    raise LookupError("SSURGO returned no soil polygons for any domain tile.")
+                tiles_with_soil = len(pieces)
+                soil = gpd.GeoDataFrame(
+                    pd.concat(pieces, ignore_index=True), crs=pieces[0].crs
+                )
+                if "mukey" in soil.columns:
+                    soil = soil.dissolve(by="mukey", as_index=False, aggfunc="first")
+            if terminal_empty_queries:
+                empty_response_path = raw_dir / "ssurgo_terminal_empty_queries.json"
+                empty_response_path.write_text(
+                    json.dumps(
+                        {
+                            "description": (
+                                "Bounds of smallest exact subqueries that returned no "
+                                "JSON Table after retries; retained as transparent no-data."
+                            ),
+                            "bounds_epsg4326": terminal_empty_queries,
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                files["terminal_empty_queries"] = empty_response_path
+            soil.to_file(path, driver="GPKG")
+        files["vector"] = path
+        metadata = {
+            "features": int(len(soil)), "columns": list(soil.columns),
+            "tile_degrees": tile_degrees, "tile_count": tile_count,
+            "tiles_with_soil": tiles_with_soil, "download_workers": workers,
+            "max_attempts": max_attempts,
+            "request_timeout_seconds": request_timeout_seconds,
+            "max_subdivision_depth": max_subdivision_depth,
+            "terminal_empty_query_count": len(terminal_empty_queries),
+        }
+    elif product.provider == "soilgrids":
+        files, metadata = download_soilgrids_hydraulic(
+            boundary, product.options, raw_dir, reuse_existing=reuse_existing
+        )
+    elif product.provider == "local":
+        source = product.options["path"]
+        files["vector"] = _copy_local(source, raw_dir / Path(source).name)
+        metadata = {"source_path": str(Path(source).expanduser().resolve())}
+    else:
+        raise ValueError(f"Unsupported soil provider: {product.provider}")
+    for key, artifact in files.items():
+        ledger.register(
+            "soil", product.provider, artifact,
+            {**product.options, "artifact": key},
+        )
+    if plot:
+        if product.provider == "soilgrids":
+            files["plot"] = _plot_native_raster(
+                files["porosity"],
+                paths.figures / "raw_soil_selected_product.png",
+                "Selected SoilGrids-derived hydraulic product: porosity",
+                "Porosity (-)", dpi,
+            )
+        else:
+            soil = gpd.read_file(files["vector"])
+            field_name = str(product.options.get("plot_field", "porosity [-]"))
+            fig, ax = plt.subplots(figsize=(7.2, 5.2), constrained_layout=True)
+            if field_name in soil:
+                soil.plot(column=field_name, ax=ax, legend=True, cmap="YlGnBu", missing_kwds={"color": "0.85"})
+            else:
+                soil.plot(ax=ax, color="0.75", edgecolor="0.25", linewidth=0.2)
+            ax.set(title=f"Selected raw soil product: {field_name}", aspect="equal")
+            plot_path = paths.figures / "raw_soil_selected_product.png"
+            fig.savefig(plot_path, dpi=dpi, bbox_inches="tight")
+            plt.close(fig)
+            files["plot"] = plot_path
+    return RawProduct("soil", product.provider, files, metadata)
+
+
+def fetch_rainfall(
+    product: ProductSpec,
+    boundary: gpd.GeoDataFrame,
+    paths: ProjectPaths,
+    ledger: ProvenanceLedger,
+    plot: bool,
+    dpi: int,
+    reuse_existing: bool = False,
+) -> RawProduct:
+    raw_dir = paths.raw / "rainfall"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    files: dict[str, Path] = {}
+    if product.provider == "watershed_workflow_aorc":
+        variables = list(product.options.get("variables", ["APCP_surface"]))
+        max_attempts = max(1, int(product.options.get("max_attempts", 5)))
+        nc_path = raw_dir / "aorc_native_hourly.nc"
+        if reuse_existing and nc_path.is_file():
+            dataset = xr.open_dataset(nc_path)
+            files["netcdf"] = nc_path
+        else:
+            _, ManagerAORC, _, _, set_data_directory = _ww_sources()
+            set_data_directory(str(paths.provider_cache / "rainfall"))
+            # ManagerAORC accepts date-only bounds and slices at midnight.  Ask
+            # for complete provider days, then perform the exact hourly slice
+            # only after the untouched provider response has been saved.
+            start_stamp = pd.Timestamp(product.options["start_utc"])
+            end_stamp = pd.Timestamp(product.options["end_utc"])
+            request_start = start_stamp.strftime("%Y-%m-%d")
+            request_end_stamp = end_stamp.normalize()
+            if end_stamp != request_end_stamp:
+                request_end_stamp += pd.Timedelta(days=1)
+            request_end = request_end_stamp.strftime("%Y-%m-%d")
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    dataset = ManagerAORC().getDataset(
+                        boundary,
+                        start=request_start,
+                        end=request_end,
+                        variables=variables,
+                    )
+                    break
+                except Exception as error:
+                    retryable = (
+                        isinstance(error, (requests.RequestException, TimeoutError, OSError))
+                        or type(error).__name__ == "ServiceUnavailableError"
+                        or "service is currently not available" in str(error).lower()
+                    )
+                    if not retryable or attempt == max_attempts:
+                        raise
+                    time.sleep(min(30.0, 3.0 * 2 ** (attempt - 1)))
+            else:
+                raise AssertionError("unreachable")
+            files["netcdf"] = _save_dataset(dataset, nc_path)
+        metadata = {
+            "variables": variables,
+            "start_utc": product.options["start_utc"],
+            "end_utc": product.options["end_utc"],
+            "time_records": int(dataset.sizes.get("time", 0)),
+            "max_attempts": max_attempts,
+        }
+        dataset.close()
+    elif product.provider == "daymet":
+        files, metadata = download_daymet_hourly(
+            boundary, product.options, raw_dir, reuse_existing=reuse_existing
+        )
+    elif product.provider == "mrms":
+        files, metadata = download_mrms_hourly(
+            boundary, product.options, raw_dir, reuse_existing=reuse_existing
+        )
+    elif product.provider == "era5_land":
+        files, metadata = download_era5_land_hourly(
+            boundary, product.options, raw_dir, reuse_existing=reuse_existing
+        )
+    elif product.provider == "local":
+        source = product.options["path"]
+        files["netcdf"] = _copy_local(source, raw_dir / Path(source).name)
+        metadata = {"source_path": str(Path(source).expanduser().resolve())}
+    else:
+        raise ValueError(f"Unsupported rainfall provider: {product.provider}")
+    for path in files.values():
+        ledger.register("rainfall", product.provider, path, product.options)
+    if plot:
+        with xr.open_dataset(files["netcdf"]) as source:
+            variable = str(product.options.get("precipitation_variable", "APCP_surface"))
+            start = pd.Timestamp(product.options["start_utc"]).tz_convert(None)
+            end = pd.Timestamp(product.options["end_utc"]).tz_convert(None)
+            data = source[variable].sel(time=slice(start + pd.Timedelta(hours=1), end))
+            accumulation = data.sum("time") if "time" in data.dims else data
+            x_name, y_name = _xy_names(accumulation)
+            fig, ax = plt.subplots(figsize=(7.2, 5.2), constrained_layout=True)
+            image = ax.pcolormesh(
+                np.asarray(accumulation[x_name]), np.asarray(accumulation[y_name]),
+                np.asarray(accumulation), shading="auto", cmap="Blues",
+            )
+            ax.set(title="Selected raw rainfall product: event accumulation", aspect="equal")
+            fig.colorbar(image, ax=ax, label="Accumulation (mm)")
+            plot_path = paths.figures / "raw_rainfall_selected_product.png"
+            fig.savefig(plot_path, dpi=dpi, bbox_inches="tight")
+            plt.close(fig)
+            files["plot"] = plot_path
+    return RawProduct("rainfall", product.provider, files, metadata)
+
+
+def fetch_hydrography(
+    product: ProductSpec,
+    boundary: gpd.GeoDataFrame,
+    paths: ProjectPaths,
+    ledger: ProvenanceLedger,
+    plot: bool,
+    dpi: int,
+    reuse_existing: bool = False,
+) -> RawProduct:
+    raw_dir = paths.raw / "hydrography"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    files: dict[str, Path] = {}
+    if product.provider == "usgs_3dhp":
+        path = raw_dir / "usgs_3dhp_flowlines.gpkg"
+        tile_degrees = float(product.options.get("tile_degrees", 1.0))
+        workers = max(1, int(product.options.get("download_workers", 4)))
+        if tile_degrees <= 0:
+            raise ValueError("hydrography.options.tile_degrees must be positive.")
+        if reuse_existing and path.is_file():
+            rivers = gpd.read_file(path)
+            tile_count = int(product.options.get("cached_tile_count", 1))
+        else:
+            query = boundary.to_crs("EPSG:4326")
+            xmin, ymin, xmax, ymax = query.total_bounds
+            if max(xmax - xmin, ymax - ymin) <= tile_degrees:
+                rivers = get_usgs_3dhp_flowlines(query)
+                tile_count = 1
+            else:
+                domain = query.geometry.union_all()
+                tile_queries: list[tuple[int, gpd.GeoDataFrame]] = []
+                for x0 in np.arange(xmin, xmax, tile_degrees):
+                    for y0 in np.arange(ymin, ymax, tile_degrees):
+                        clipped = domain.intersection(
+                            box(
+                                float(x0), float(y0),
+                                float(min(x0 + tile_degrees, xmax)),
+                                float(min(y0 + tile_degrees, ymax)),
+                            )
+                        )
+                        if clipped.is_empty:
+                            continue
+                        index = len(tile_queries) + 1
+                        tile_queries.append((
+                            index,
+                            gpd.GeoDataFrame(
+                                {"tile": [index]}, geometry=[clipped], crs="EPSG:4326"
+                            ),
+                        ))
+                tile_count = len(tile_queries)
+                tile_results: dict[int, gpd.GeoDataFrame] = {}
+
+                def download_tile(item):
+                    index, tile = item
+                    try:
+                        return index, get_usgs_3dhp_flowlines(tile)
+                    except LookupError:
+                        return index, gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+
+                with ThreadPoolExecutor(max_workers=min(workers, tile_count)) as executor:
+                    futures = [executor.submit(download_tile, item) for item in tile_queries]
+                    for future in as_completed(futures):
+                        index, result = future.result()
+                        tile_results[index] = result
+                tile_dir = raw_dir / "tiles"
+                tile_dir.mkdir(parents=True, exist_ok=True)
+                pieces = []
+                for index in sorted(tile_results):
+                    piece = tile_results[index]
+                    if piece.empty:
+                        continue
+                    tile_path = tile_dir / f"usgs_3dhp_tile_{index:04d}.gpkg"
+                    piece.to_file(tile_path, driver="GPKG")
+                    files[f"tile_{index:04d}"] = tile_path
+                    pieces.append(piece)
+                if not pieces:
+                    raise LookupError("USGS 3DHP returned no flowlines for any domain tile.")
+                rivers = gpd.GeoDataFrame(
+                    pd.concat(pieces, ignore_index=True), crs=pieces[0].crs
+                )
+                lookup = {str(column).lower(): column for column in rivers.columns}
+                identifier = next(
+                    (
+                        lookup[name] for name in (
+                            "permanent_identifier", "nhdplusid", "objectid", "globalid"
+                        ) if name in lookup
+                    ),
+                    None,
+                )
+                if identifier is not None:
+                    rivers = rivers.drop_duplicates(subset=[identifier], keep="first")
+                else:
+                    geometry_key = rivers.geometry.to_wkb(hex=True)
+                    rivers = rivers.loc[~geometry_key.duplicated()].copy()
+            rivers.to_file(path, driver="GPKG")
+        files["vector"] = path
+        metadata = {
+            "features": int(len(rivers)), "tile_degrees": tile_degrees,
+            "tile_count": tile_count, "download_workers": workers,
+        }
+    elif product.provider == "local":
+        source = product.options["path"]
+        files["vector"] = _copy_local(source, raw_dir / Path(source).name)
+        rivers = gpd.read_file(files["vector"])
+        metadata = {"features": int(len(rivers))}
+    else:
+        raise ValueError(f"Unsupported hydrography provider: {product.provider}")
+    for key, artifact in files.items():
+        ledger.register(
+            "hydrography", product.provider, artifact,
+            {**product.options, "artifact": key},
+        )
+    if plot:
+        fig, ax = plt.subplots(figsize=(7.2, 5.2), constrained_layout=True)
+        boundary.to_crs(rivers.crs).boundary.plot(ax=ax, color="black", linewidth=0.8)
+        rivers.plot(ax=ax, color="#0072B2", linewidth=0.5)
+        ax.set(title="Selected raw hydrography product", aspect="equal")
+        plot_path = paths.figures / "raw_hydrography_selected_product.png"
+        fig.savefig(plot_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        files["plot"] = plot_path
+    return RawProduct("hydrography", product.provider, files, metadata)
+
+
+def fetch_drainage(
+    product: ProductSpec,
+    boundary: gpd.GeoDataFrame,
+    paths: ProjectPaths,
+    ledger: ProvenanceLedger,
+    plot: bool,
+    dpi: int,
+    reuse_existing: bool = False,
+) -> RawProduct:
+    raw_dir = paths.raw / "drainage"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    files: dict[str, Path] = {}
+    if product.provider == "local_vector":
+        source = product.options["path"]
+        files["vector"] = _copy_local(source, raw_dir / Path(source).name)
+        data = gpd.read_file(files["vector"])
+        ledger.register("drainage", product.provider, files["vector"], product.options)
+        if plot:
+            fig, ax = plt.subplots(figsize=(7.2, 5.2), constrained_layout=True)
+            boundary.to_crs(data.crs).boundary.plot(ax=ax, color="black", linewidth=0.8)
+            data.plot(ax=ax, color="#CC79A7", linewidth=0.7)
+            ax.set(title="Selected raw drainage product", aspect="equal")
+            plot_path = paths.figures / "raw_drainage_selected_product.png"
+            fig.savefig(plot_path, dpi=dpi, bbox_inches="tight")
+            plt.close(fig)
+            files["plot"] = plot_path
+        return RawProduct("drainage", product.provider, files, {"features": int(len(data))})
+    if product.provider == "local_raster":
+        source = product.options["path"]
+        files["raster"] = _copy_local(source, raw_dir / Path(source).name)
+        ledger.register("drainage", product.provider, files["raster"], product.options)
+        if plot:
+            files["plot"] = _plot_native_raster(
+                files["raster"], paths.figures / "raw_drainage_selected_product.png",
+                "Selected raw drainage product", "Drainage class", dpi,
+            )
+        return RawProduct("drainage", product.provider, files)
+    if product.provider == "synthetic_nlcd":
+        return RawProduct(
+            "drainage", product.provider, {},
+            {"raw_dependency": "land_cover/impervious", "note": "derived product; no independent download"},
+        )
+    raise ValueError(f"Unsupported drainage provider: {product.provider}")
+
+
+def fetch_initial_state(
+    product: ProductSpec,
+    boundary: gpd.GeoDataFrame,
+    paths: ProjectPaths,
+    ledger: ProvenanceLedger,
+    plot: bool,
+    dpi: int,
+    reuse_existing: bool = False,
+) -> RawProduct:
+    """Save the selected initial-depth source before RIFT-grid processing."""
+    raw_dir = paths.raw / "initial_state"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    files: dict[str, Path] = {}
+    if product.provider == "local":
+        source = Path(product.options["path"])
+        files["raster"] = _copy_local(source, raw_dir / source.name)
+    elif product.provider in {"dry_zero", "constant"}:
+        depth_m = 0.0 if product.provider == "dry_zero" else float(
+            product.options.get("depth_m", 0.0)
+        )
+        if not np.isfinite(depth_m) or depth_m < 0:
+            raise ValueError("Initial water depth must be a finite nonnegative value.")
+        definition = raw_dir / "initial_state_definition.json"
+        definition.write_text(json.dumps({
+            "provider": product.provider,
+            "depth_m": depth_m,
+            "description": "User-selected initial water-depth definition",
+        }, indent=2), encoding="utf-8")
+        files["definition"] = definition
+    else:
+        raise ValueError(
+            f"Unsupported initial_state provider: {product.provider}. "
+            "Use dry_zero, constant, or local."
+        )
+    for key, artifact in files.items():
+        ledger.register(
+            "initial_state", product.provider, artifact,
+            {**product.options, "artifact": key},
+        )
+    if plot:
+        plot_path = paths.figures / "raw_initial_state_selected_product.png"
+        if product.provider == "local":
+            files["plot"] = _plot_native_raster(
+                files["raster"], plot_path,
+                "Selected raw initial water-depth product", "Water depth (m)", dpi,
+            )
+        else:
+            selected_depth = (
+                0.0 if product.provider == "dry_zero"
+                else float(product.options.get("depth_m", 0.0))
+            )
+            fig, ax = plt.subplots(figsize=(7.2, 5.2), constrained_layout=True)
+            boundary.plot(
+                ax=ax, facecolor="#DCEEFF", edgecolor="#005A9C", linewidth=0.9
+            )
+            ax.set(
+                title=f"Selected initial water-depth definition: {selected_depth:g} m",
+                aspect="equal",
+            )
+            ax.text(
+                0.5, 0.04, f"Uniform water depth = {selected_depth:g} m",
+                transform=ax.transAxes, ha="center", va="bottom",
+                bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "0.6"},
+            )
+            fig.savefig(plot_path, dpi=dpi, bbox_inches="tight")
+            plt.close(fig)
+            files["plot"] = plot_path
+    metadata = dict(product.options)
+    if product.provider in {"dry_zero", "constant"}:
+        metadata["depth_m"] = (
+            0.0 if product.provider == "dry_zero"
+            else float(product.options.get("depth_m", 0.0))
+        )
+    return RawProduct("initial_state", product.provider, files, metadata)
+
+
+def _download_json(
+    url: str,
+    params: dict[str, Any] | None,
+    destination: Path,
+    headers: dict[str, str] | None = None,
+) -> Path:
+    request_headers = {"User-Agent": "riftprep/0.3"}
+    request_headers.update(headers or {})
+    response = requests.get(
+        url, params=params, timeout=600, headers=request_headers
+    )
+    response.raise_for_status()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(response.content)
+    json.loads(response.content)
+    return destination
+
+
+def fetch_nwis_legacy(
+    name: str,
+    product: ProductSpec,
+    paths: ProjectPaths,
+    ledger: ProvenanceLedger,
+    plot: bool = True,
+    dpi: int = 180,
+    reuse_existing: bool = False,
+) -> RawProduct:
+    """Download explicitly selected sites from the retired NWIS WaterServices API."""
+    raw_dir = paths.raw / name
+    files: dict[str, Path] = {}
+    stations = list(product.options.get("stations", []))
+    if not stations:
+        raise ValueError(f"{name}.options.stations must list explicit NWIS sites.")
+    grouped: dict[tuple[str, str], list[str]] = {}
+    for station in stations:
+        service = str(station.get("service", "iv"))
+        default_parameter = "00060" if name == "inflows" else "00065"
+        parameter = str(station.get("parameter_code", default_parameter))
+        grouped.setdefault((service, parameter), []).append(str(station["site"]))
+    for (service, parameter), sites in grouped.items():
+        params = {
+            "format": "json", "sites": ",".join(sorted(set(sites))), "parameterCd": parameter,
+            "startDT": product.options["start_utc"], "endDT": product.options["end_utc"],
+            "siteStatus": "all",
+        }
+        path = raw_dir / f"nwis_{service}_{parameter}.json"
+        if not (reuse_existing and path.is_file()):
+            path = _download_json(
+                f"https://waterservices.usgs.gov/nwis/{service}/", params, path,
+            )
+        key = f"{service}_{parameter}"
+        files[key] = path
+        ledger.register(
+            name, "usgs_nwis_legacy", path,
+            {**product.options, "sites": sorted(set(sites))},
+        )
+    if plot:
+        fig, ax = plt.subplots(figsize=(7.2, 3.6), constrained_layout=True)
+        plotted = 0
+        for key, path in list(files.items()):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for series in payload.get("value", {}).get("timeSeries", []):
+                points = [point for block in series.get("values", []) for point in block.get("value", [])]
+                if not points:
+                    continue
+                times = pd.to_datetime([point["dateTime"] for point in points], utc=True)
+                values = pd.to_numeric([point["value"] for point in points], errors="coerce")
+                site = series.get("sourceInfo", {}).get("siteCode", [{}])[0].get("value", key)
+                variable = series.get("variable", {}).get("variableCode", [{}])[0].get("value", "")
+                ax.plot(times, values, linewidth=0.9, label=f"{site} ({variable})")
+                plotted += 1
+        if plotted:
+            ax.set(title=f"Selected raw {name} time series", xlabel="UTC", ylabel="Provider value")
+            ax.legend(ncol=min(3, plotted), fontsize=7)
+            plot_path = paths.figures / f"raw_{name}_selected_product.png"
+            fig.savefig(plot_path, dpi=dpi, bbox_inches="tight")
+            files["plot"] = plot_path
+        plt.close(fig)
+    return RawProduct(name, "usgs_nwis_legacy", files, {"stations": stations})
+
+
+def _waterdata_session() -> requests.Session:
+    retry = Retry(
+        total=5,
+        connect=5,
+        read=5,
+        backoff_factor=2.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    session.headers.update({"User-Agent": "riftprep/0.3"})
+    api_key = os.environ.get("USGS_WATERDATA_API_KEY")
+    if api_key:
+        session.headers.update({"X-Api-Key": api_key})
+    return session
+
+
+def _waterdata_site_id(site: str) -> str:
+    site = str(site).strip()
+    return site if site.upper().startswith("USGS-") else f"USGS-{site}"
+
+
+def _load_completed_waterdata_download(
+    manifest_path: Path,
+    raw_dir: Path,
+    expected: list[dict[str, str]],
+    start_utc: str,
+    end_utc: str,
+) -> dict[str, Path] | None:
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if (
+            manifest.get("requests") != expected
+            or manifest.get("start_utc") != start_utc
+            or manifest.get("end_utc") != end_utc
+        ):
+            return None
+        names = list(manifest["files"])
+        paths: dict[str, Path] = {}
+        for filename in names:
+            stem = Path(filename).stem.removeprefix("waterdata_")
+            if stem.startswith("location_"):
+                key = stem
+            else:
+                key = f"observations_{stem.replace('_page_', '_')}"
+            paths[key] = raw_dir / filename
+        if not all(path.is_file() for path in paths.values()):
+            return None
+        paths["download_manifest"] = manifest_path
+        return paths
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def fetch_usgs_waterdata(
+    name: str,
+    product: ProductSpec,
+    paths: ProjectPaths,
+    ledger: ProvenanceLedger,
+    plot: bool = True,
+    dpi: int = 180,
+    reuse_existing: bool = False,
+) -> RawProduct:
+    """Download current USGS Water Data OGC observations and station metadata.
+
+    Each response page is retained byte-for-byte in ``raw/``. A completion
+    manifest makes cache reuse explicit and prevents reuse of partial downloads.
+    """
+    raw_dir = paths.raw / name
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    stations = list(product.options.get("stations", []))
+    if not stations:
+        raise ValueError(f"{name}.options.stations must list explicit USGS sites.")
+    default_collection = str(product.options.get("collection", "continuous"))
+    expected = sorted(
+        [
+            {
+                "site": _waterdata_site_id(station["site"]),
+                "parameter_code": str(station.get(
+                    "parameter_code", "00060" if name == "inflows" else "00065"
+                )),
+                "collection": str(station.get("collection", default_collection)),
+            }
+            for station in stations
+        ],
+        key=lambda item: (item["collection"], item["site"], item["parameter_code"]),
+    )
+    manifest_path = raw_dir / "waterdata_download_complete.json"
+    files = (
+        _load_completed_waterdata_download(
+            manifest_path, raw_dir, expected,
+            str(product.options["start_utc"]), str(product.options["end_utc"]),
+        )
+        if reuse_existing else None
+    )
+    if files is None:
+        files = {}
+        session = _waterdata_session()
+        base = "https://api.waterdata.usgs.gov/ogcapi/v1/collections"
+        downloaded_names: list[str] = []
+        for request in expected:
+            site = request["site"]
+            bare_site = site.removeprefix("USGS-")
+            parameter = request["parameter_code"]
+            collection = request["collection"]
+            location_path = raw_dir / f"waterdata_location_{bare_site}.json"
+            if location_path.name not in downloaded_names:
+                response = session.get(
+                    f"{base}/monitoring-locations/items/{site}",
+                    params={"f": "json"}, timeout=600,
+                )
+                response.raise_for_status()
+                json.loads(response.content)
+                location_path.write_bytes(response.content)
+                files[f"location_{bare_site}"] = location_path
+                downloaded_names.append(location_path.name)
+
+            url = f"{base}/{collection}/items"
+            params: dict[str, Any] | None = {
+                "f": "json",
+                "limit": 10000,
+                "monitoring_location_id": site,
+                "parameter_code": parameter,
+                "datetime": (
+                    f"{product.options['start_utc']}/{product.options['end_utc']}"
+                ),
+            }
+            page = 1
+            while url:
+                page_path = raw_dir / (
+                    f"waterdata_{collection}_{bare_site}_{parameter}_page_{page:03d}.json"
+                )
+                response = session.get(url, params=params, timeout=600)
+                response.raise_for_status()
+                payload = response.json()
+                page_path.write_bytes(response.content)
+                files[
+                    f"observations_{collection}_{bare_site}_{parameter}_{page:03d}"
+                ] = page_path
+                downloaded_names.append(page_path.name)
+                next_links = [
+                    link.get("href") for link in payload.get("links", [])
+                    if link.get("rel") == "next" and link.get("href")
+                ]
+                url = urljoin(str(response.url), next_links[0]) if next_links else ""
+                params = None
+                page += 1
+        manifest = {
+            "provider": "usgs_waterdata",
+            "api_base": base,
+            "requests": expected,
+            "start_utc": product.options["start_utc"],
+            "end_utc": product.options["end_utc"],
+            "files": downloaded_names,
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        files["download_manifest"] = manifest_path
+
+    for key, path in files.items():
+        ledger.register(
+            name, "usgs_waterdata", path,
+            {**product.options, "artifact": key},
+        )
+
+    if plot:
+        fig, ax = plt.subplots(figsize=(7.2, 3.6), constrained_layout=True)
+        plotted = 0
+        series_points: dict[tuple[str, str, str], list[tuple[str, Any]]] = {}
+        for key, path in files.items():
+            if not key.startswith("observations_"):
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for feature in payload.get("features", []):
+                props = feature.get("properties", {})
+                series_key = (
+                    str(props.get("monitoring_location_id", "")),
+                    str(props.get("parameter_code", "")),
+                    str(props.get("time_series_id", "")),
+                )
+                series_points.setdefault(series_key, []).append(
+                    (props.get("time"), props.get("value"))
+                )
+        for (site, parameter, series_id), points in series_points.items():
+            frame = pd.DataFrame(points, columns=["time", "value"])
+            frame["time"] = pd.to_datetime(frame["time"], utc=True, errors="coerce")
+            frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+            frame = frame.dropna().sort_values("time")
+            if frame.empty:
+                continue
+            suffix = f", {series_id}" if len(series_points) > 1 else ""
+            ax.plot(
+                frame["time"], frame["value"], linewidth=0.9,
+                label=f"{site} ({parameter}{suffix})",
+            )
+            plotted += 1
+        if plotted:
+            ax.set(
+                title=f"Selected raw {name} time series",
+                xlabel="UTC", ylabel="Provider value",
+            )
+            ax.legend(ncol=min(3, plotted), fontsize=7)
+            plot_path = paths.figures / f"raw_{name}_selected_product.png"
+            fig.savefig(plot_path, dpi=dpi, bbox_inches="tight")
+            files["plot"] = plot_path
+        plt.close(fig)
+    return RawProduct(name, "usgs_waterdata", files, {"stations": stations})
+
+
+def acquire_raw_product(
+    name: str,
+    spec: CaseSpec,
+    paths: ProjectPaths,
+    ledger: ProvenanceLedger,
+    boundary: gpd.GeoDataFrame,
+    timing_stage,
+    query_geometry: gpd.GeoDataFrame | None = None,
+) -> RawProduct:
+    """Acquire one explicitly selected raw product for a staged notebook workflow."""
+    query = boundary if query_geometry is None else query_geometry
+    fetchers = {
+        "dem": fetch_dem,
+        "hydrography": fetch_hydrography,
+        "land_cover": fetch_land_cover,
+        "soil": fetch_soil,
+        "rainfall": fetch_rainfall,
+        "drainage": fetch_drainage,
+        "initial_state": fetch_initial_state,
+    }
+    if name in fetchers:
+        product = getattr(spec, name)
+        if not product.enabled:
+            raise ValueError(f"Raw product {name!r} is disabled in the case configuration.")
+        with timing_stage(f"download_raw_{name}"):
+            source_geometry = (
+                boundary
+                if name in {"soil", "hydrography"} or (
+                    name == "dem" and spec.domain.outside_dem_mode == "wall"
+                )
+                else query
+            )
+            return fetchers[name](
+                product, source_geometry, paths, ledger,
+                spec.plots.raw_products, spec.plots.dpi,
+                spec.cache.mode == "reuse",
+            )
+    if name in {"inflows", "coastal"}:
+        product = getattr(spec, name)
+        if not product.enabled:
+            raise ValueError(f"Raw product {name!r} is disabled in the case configuration.")
+        with timing_stage(f"download_raw_{name}"):
+            if product.provider == "usgs_waterdata":
+                return fetch_usgs_waterdata(
+                    name, product, paths, ledger, spec.plots.raw_products,
+                    spec.plots.dpi, spec.cache.mode == "reuse",
+                )
+            if product.provider in {"usgs_nwis", "usgs_nwis_legacy"}:
+                return fetch_nwis_legacy(
+                    name, product, paths, ledger, spec.plots.raw_products,
+                    spec.plots.dpi, spec.cache.mode == "reuse",
+                )
+            raise ValueError(
+                f"Unsupported {name} provider: {product.provider}. "
+                "Use usgs_waterdata or usgs_nwis_legacy."
+            )
+    raise KeyError(f"Unknown raw product: {name!r}")
+
+
+def acquire_all_raw(
+    spec: CaseSpec,
+    paths: ProjectPaths,
+    ledger: ProvenanceLedger,
+    boundary: gpd.GeoDataFrame,
+    timing_stage,
+    query_geometry: gpd.GeoDataFrame | None = None,
+) -> RawCatalog:
+    """Acquire every enabled source before any processing begins."""
+    products: dict[str, RawProduct] = {}
+    for name in (
+        "dem", "hydrography", "land_cover", "soil", "rainfall",
+        "drainage", "inflows", "coastal",
+        "initial_state",
+    ):
+        if getattr(spec, name).enabled:
+            products[name] = acquire_raw_product(
+                name, spec, paths, ledger, boundary, timing_stage, query_geometry
+            )
+    return RawCatalog(boundary=boundary, products=products)
