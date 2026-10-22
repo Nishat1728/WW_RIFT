@@ -125,8 +125,12 @@ def test_complete_local_raw_first_workflow(tmp_path: Path, two_stage):
         assert "output.interval_s = 86400" in spinup_text
         assert "output.hotstart = 1" in spinup_text
         assert "output.hotstart = 1" in config_text
-        assert "simulation_ready/spinup_water_depth.asc" in config_text
-        assert not (result.case_root / "simulation_ready/spinup_water_depth.asc").exists()
+        assert "restart.hotstart = simulation_ready/spinup_hotstart.bin" in config_text
+        assert "initial.water_depth" not in config_text
+        assert "forcing.time_origin_s = 10368000" in config_text
+        assert "simulation.start_time_s = 10368000" in config_text
+        assert "output.final_hotstart = 1" in spinup_text
+        assert not (result.case_root / "simulation_ready/spinup_hotstart.bin").exists()
         baseflow = json.loads((result.case_root / "quality_control/spinup_baseflow.json").read_text())
         assert baseflow["stations"][0]["method"] == "explicit_user_constant"
         assert "simulate-stages" in (result.case_root / "RUN.md").read_text()

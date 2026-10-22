@@ -516,7 +516,8 @@ def update_simulation_duration(change=None):
         seconds = simulation_duration_seconds(snapshot_widget_values(globals()))
         SIMULATION_DURATION_PREVIEW.value = (
             f"<b>Simulation duration:</b> {seconds / 3600:g} hours ({seconds:g} seconds). "
-            "Simulation time starts at 0; rebuild the managers after changing settings."
+            "Event elapsed time starts at 0; with spin-up, the solver retains its restored clock. "
+            "Rebuild the managers after changing settings."
         )
     except ValueError:
         SIMULATION_DURATION_PREVIEW.value = (
@@ -686,14 +687,15 @@ display(widget_box(
 
 By default the event matches the rainfall window above. To choose different dates, uncheck
 **Match rainfall window**: these dates then control downloads of ALL enabled transient forcings.
-Both solver clocks begin at zero; UTC dates identify their real-world windows. Save frequency
+UTC dates identify the real-world windows. The event's elapsed clock begins at zero, but a
+hotstart continuation retains solver time and uses a forcing-origin offset. Save frequency
 applies to depth, discharge, water-surface and hotstart outputs together."""),
     code('''TRANSIENT_MATCH_RAINFALL_WIDGET = widgets.Checkbox(
     value=True, description="Match rainfall window", indent=False)
 TRANSIENT_START_WIDGET = widgets.Text(value="2023-06-10T00:00:00Z", description="Event start UTC", style=WIDGET_STYLE)
 TRANSIENT_END_WIDGET = widgets.Text(value="2023-06-11T00:00:00Z", description="Event end UTC", style=WIDGET_STYLE)
 TRANSIENT_OUTPUT_HOURS_WIDGET = widgets.FloatText(value=1.0, description="Save every (hours)", style=WIDGET_STYLE)
-TRANSIENT_SAVE_HOTSTART_WIDGET = widgets.Checkbox(value=True, description="Save transient hotstarts", indent=False)
+TRANSIENT_SAVE_HOTSTART_WIDGET = widgets.Checkbox(value=True, description="Save periodic transient hotstarts", indent=False)
 TRANSIENT_OUTPUT_DIRECTORY_WIDGET = widgets.Text(value="results/transient", description="Event output folder", style=WIDGET_STYLE)
 
 def update_event_controls(change=None):
@@ -747,8 +749,11 @@ Example manual station:
 `[{"id":"inlet","constant_m3_s":0.2,"support":{"x":-72.2,"y":41.7,"crs":"EPSG:4326"}}]`
 
 No rainfall is acquired for spin-up. The selected constant has two endpoints spanning its whole
-duration. **Depth-only handoff:** velocities, soil and urban storage are not transferred. Read
-the generated RUN.md before simulation; latest saved depth can be one output interval old."""),
+duration. **Complete hotstart continuation:** momentum, infiltration history, soil saturation and
+urban storage are retained without resampling. A checkpoint at the EXACT spin-up end is mandatory
+even when periodic hotstarts are off. Event diagnostic statistics are reset, not physical state.
+This requires the supplied RIFT-UConn complete-restart integration; an unpatched solver is rejected.
+Read `integrations/rift_uconn/README.md` and the generated RUN.md before simulation."""),
     code('''SPINUP_ENABLED_WIDGET = widgets.Checkbox(value=True, description="Prepare spin-up + transient CFGs", indent=False)
 SPINUP_AUTO_WINDOW_WIDGET = widgets.Checkbox(value=True, description="Four calendar months before event", indent=False)
 SPINUP_START_WIDGET = widgets.Text(value="2023-02-10T00:00:00Z", description="Spin-up start UTC", style=WIDGET_STYLE)
@@ -766,7 +771,7 @@ SPINUP_QUANTILE_WIDGET = widgets.BoundedFloatText(value=0, min=0, max=1, step=0.
 SPINUP_MINIMUM_COVERAGE_WIDGET = widgets.FloatSlider(value=0.9, min=0.01, max=1, step=0.01,
     description="Minimum valid-day fraction", readout_format=".2f", style=WIDGET_STYLE)
 SPINUP_OUTPUT_HOURS_WIDGET = widgets.FloatText(value=24.0, description="Save every (hours)", style=WIDGET_STYLE)
-SPINUP_SAVE_HOTSTART_WIDGET = widgets.Checkbox(value=True, description="Save spin-up hotstarts", indent=False)
+SPINUP_SAVE_HOTSTART_WIDGET = widgets.Checkbox(value=True, description="Save periodic spin-up hotstarts", indent=False)
 SPINUP_OUTPUT_DIRECTORY_WIDGET = widgets.Text(value="results/spinup", description="Spin-up output folder", style=WIDGET_STYLE)
 
 def update_spinup_controls(change=None):

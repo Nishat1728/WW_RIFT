@@ -12,7 +12,7 @@ from riftprep.managers import fetch_usgs_waterdata, RawProduct, RawCatalog
 from riftprep.notebook_frontend import case_payload_from_widget_values
 from riftprep.spec import case_from_mapping, ProductSpec
 from riftprep.spinup import (
-    SpinupSpec, calendar_shift, daily_quantile, prepare_depth_handoff,
+    SpinupSpec, calendar_shift, daily_quantile,
     prepare_baseflow, run_stages,
 )
 from riftprep.writers import build_rift_config, write_esri_ascii
@@ -131,36 +131,70 @@ def test_checked_history_to_constant_si_hydrograph_and_raw_unchanged(tmp_path):
     assert table.is_file()
 
 
-def test_handoff_uses_latest_snapshot_and_rejects_stale_or_outside_paths(tmp_path):
+def _checkpoint(path, stamp=86400.0, nodes=(3, 3), flags=255):
+    import struct
+    from riftprep.restart import CONTRACT, checkpoint_fields
+    names = checkpoint_fields(flags)
+    def string(value):
+        return struct.pack("<I", len(value)) + value
+    content = b"WWRIFT01" + struct.pack("<IIdd", 1, flags, stamp, 0.1)
+    content += string(struct.pack("<ii", *nodes)) + struct.pack("<I", len(names))
+    cells = (nodes[0]+3)*(nodes[1]+3)
+    for i, name in enumerate(names):
+        content += string(name.encode()) + struct.pack("<Q", cells)
+        content += np.full(cells, i+0.5, dtype="<f8").tobytes()
+    content += struct.pack("<Q?i", 1, True, 0) + struct.pack("<dddd?", 1, 2, 3, 4, True)
+    path.write_bytes(content)
+    Path(str(path)+".json").write_text(json.dumps({
+        "schema": CONTRACT, "simulation_time_s": stamp, "flags": flags,
+        "node_columns": nodes[0], "node_rows": nodes[1], "fields": names,
+    }))
+    return path
+
+
+def _plan():
+    return {"schema": "riftprep-two-stage-v2", "spinup_output_directory": "results/spinup",
+            "spinup_duration_s": 86400, "spinup_config": "rift_spinup.cfg",
+            "transient_config": "rift_case.cfg", "transient_duration_s": 3600,
+            "handoff_hotstart": "simulation_ready/spinup_hotstart.bin"}
+
+
+def _capabilities():
+    from riftprep.restart import CONTRACT
+    return SimpleNamespace(returncode=0, stdout=json.dumps({
+        "schema": CONTRACT, "forcing_time_origin": True, "exact_final_checkpoint": True}))
+
+
+def test_handoff_keeps_every_binary_state_unchanged_and_requires_exact_end(tmp_path):
+    from riftprep.restart import inspect_checkpoint, prepare_hotstart_handoff
     paths = ProjectPaths.create(tmp_path)
     output = paths.results / "spinup"
     output.mkdir()
     grid = GridSpec(0, 0, 60, 60, 30, "EPSG:5070", 2, 2)
     (paths.quality_control / "grid.json").write_text(json.dumps(asdict(grid)))
-    for i, depth in [(0, 0), (7, 2)]:
-        write_esri_ascii(output / f"water_depth_{i:04d}.asc", np.full((2, 2), depth), grid)
-    (output / "snapshot_index.csv").write_text(
-        "snapshot_index,simulation_time_s,water_depth_file\n"
-        "0,0,water_depth_0000.asc\n7,86399,water_depth_0007.asc\n")
-    plan = {"spinup_output_directory": "results/spinup", "spinup_duration_s": 86400,
-            "maximum_snapshot_age_s": 86400, "handoff_depth": "simulation_ready/spinup_water_depth.asc"}
-    target = prepare_depth_handoff(tmp_path, plan)
-    assert np.allclose(np.loadtxt(target, skiprows=6), 2)
-    assert json.loads((paths.quality_control / "spinup_handoff.json").read_text())["snapshot_age_s"] == 1
-    with pytest.raises(ValueError, match="allowed"):
-        prepare_depth_handoff(tmp_path, {**plan, "spinup_duration_s": 300000})
+    source = _checkpoint(output / "final_hotstart.bin")
+    target = prepare_hotstart_handoff(tmp_path, _plan())
+    assert target.read_bytes() == source.read_bytes()
+    state = inspect_checkpoint(target)
+    assert {"momentum_x", "momentum_y", "soil_saturation", "moisture_deficit",
+            "urban_storage", "cumulative_infiltration"} <= set(state["fields"])
+    with pytest.raises(ValueError, match="exact requested"):
+        prepare_hotstart_handoff(tmp_path, {**_plan(), "spinup_duration_s": 86401})
     with pytest.raises(ValueError, match="within"):
-        prepare_depth_handoff(tmp_path, {**plan, "handoff_depth": "../outside.asc"})
+        prepare_hotstart_handoff(tmp_path, {**_plan(), "handoff_hotstart": "../outside.bin"})
+    with pytest.raises(ValueError, match="match this case"):
+        inspect_checkpoint(target, expected_nodes=(10, 10))
+    truncated = tmp_path / "truncated.bin"
+    truncated.write_bytes(source.read_bytes()[:60])
+    with pytest.raises(ValueError, match="Truncated"):
+        inspect_checkpoint(truncated)
 
 
 def test_stages_do_not_use_stale_output_or_advance_after_failed_solver(tmp_path, monkeypatch):
     import riftprep.spinup as spinup
     paths = ProjectPaths.create(tmp_path)
     build_rift_config(tmp_path / "rift_case.cfg", SimulationSpec(), {}, {})
-    (tmp_path / "simulation_plan.json").write_text(json.dumps({
-        "spinup_output_directory": "results/spinup", "spinup_duration_s": 86400,
-        "spinup_config": "rift_spinup.cfg", "transient_config": "rift_case.cfg",
-    }))
+    (tmp_path / "simulation_plan.json").write_text(json.dumps(_plan()))
     (paths.results / "spinup").mkdir()
     (paths.results / "spinup/old.txt").write_text("old")
     with pytest.raises(FileExistsError):
@@ -168,39 +202,37 @@ def test_stages_do_not_use_stale_output_or_advance_after_failed_solver(tmp_path,
     (paths.results / "spinup/old.txt").unlink()
     calls = []
     def failed(command, **kwargs):
-        calls.append(command)
-        return SimpleNamespace(returncode=1)
+        calls.append(command[-1])
+        return _capabilities() if command[-1] == "--restart-capabilities" else SimpleNamespace(returncode=1)
     monkeypatch.setattr(spinup.subprocess, "run", failed)
     with pytest.raises(RuntimeError, match="did not confirm"):
         run_stages(tmp_path, "/fake/rift")
-    assert len(calls) == 1
+    assert calls == ["--restart-capabilities", "rift_spinup.cfg"]
+    monkeypatch.setattr(spinup.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="{}", returncode=0))
+    with pytest.raises(RuntimeError, match="lacks the complete-restart"):
+        run_stages(tmp_path, "/fake/rift")
 
 
-def test_stage_runner_order_and_successful_depth_handoff(tmp_path, monkeypatch):
+def test_stage_runner_order_and_successful_complete_restart(tmp_path, monkeypatch):
     import riftprep.spinup as spinup
     paths = ProjectPaths.create(tmp_path)
     grid = GridSpec(0, 0, 60, 60, 30, "EPSG:5070", 2, 2)
     (paths.quality_control / "grid.json").write_text(json.dumps(asdict(grid)))
     build_rift_config(tmp_path / "rift_case.cfg", SimulationSpec(end_time_s=3600), {}, {})
-    plan = {"spinup_output_directory": "results/spinup", "spinup_duration_s": 86400,
-            "spinup_config": "rift_spinup.cfg", "transient_config": "rift_case.cfg",
-            "transient_duration_s": 3600, "maximum_snapshot_age_s": 86400,
-            "handoff_depth": "simulation_ready/spinup_water_depth.asc"}
-    (tmp_path / "simulation_plan.json").write_text(json.dumps(plan))
+    (tmp_path / "simulation_plan.json").write_text(json.dumps(_plan()))
     calls = []
     def solver(command, **kwargs):
         calls.append(command[-1])
+        if command[-1] == "--restart-capabilities":
+            return _capabilities()
         if command[-1] == "rift_spinup.cfg":
-            output = paths.results / "spinup"
-            write_esri_ascii(output / "water_depth_0100.asc", np.ones((2, 2)), grid)
-            (output / "snapshot_index.csv").write_text(
-                "snapshot_index,simulation_time_s,water_depth_file\n100,86400,water_depth_0100.asc\n")
+            _checkpoint(paths.results / "spinup/final_hotstart.bin")
             kwargs["stdout"].write("[summary] wall_s=1 simulated_s=86400 steps=10 outputs=2\n")
         else:
-            assert (paths.simulation_ready / "spinup_water_depth.asc").is_file()
+            assert (paths.simulation_ready / "spinup_hotstart.bin").is_file()
             kwargs["stdout"].write("[summary] wall_s=1 simulated_s=3600 steps=10 outputs=2\n")
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr(spinup.subprocess, "run", solver)
     target = run_stages(tmp_path, "/fake/rift")
     assert target.is_file()
-    assert calls == ["rift_spinup.cfg", "rift_case.cfg"]
+    assert calls == ["--restart-capabilities", "rift_spinup.cfg", "rift_case.cfg"]

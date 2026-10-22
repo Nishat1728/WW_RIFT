@@ -23,7 +23,7 @@ def _parser() -> argparse.ArgumentParser:
     validate.add_argument("config", help="Path to a case YAML file.")
     providers = commands.add_parser("providers", help="Print the provider catalog.")
     providers.add_argument("--category", default=None)
-    stages = commands.add_parser("simulate-stages", help="Run spin-up, checked depth handoff, then transient (requires RIFT GPU solver).")
+    stages = commands.add_parser("simulate-stages", help="Run spin-up and complete-hotstart transient continuation (requires the integrated RIFT GPU solver).")
     stages.add_argument("case_root")
     stages.add_argument("--executable", required=True, help="Path to the installed RIFT solver.")
     return parser

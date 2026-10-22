@@ -42,6 +42,7 @@ deliverables/
 tmp/
 .publish/
 .validation_spinup/
+.validation_restart/
 .netrc
 _netrc
 .cdsapirc

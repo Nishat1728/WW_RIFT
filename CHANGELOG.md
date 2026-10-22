@@ -8,9 +8,10 @@ All notable changes to this project are documented here. Versions follow semanti
   (hotstart ON by default), with a four-calendar-month rain-free spin-up and daily outputs.
 - Added fresh USGS daily-mean discharge histories (20 years by default), selectable low-flow
   quantiles, coverage/zero/invalid-day evidence, and explicitly disclosed manual constants.
-- Added two CFGs and a fail-closed stage runner with completion checks, latest-snapshot selection,
-  cell-to-node depth-only handoff, age disclosure and zero-clock event alignment. This does not
-  transfer full soil, momentum or urban storage state.
+- Added two CFGs and a fail-closed complete hotstart continuation. A supplied, copy-only RIFT-UConn
+  integration preserves hydraulic, infiltration, soil and urban-storage states, writes exact-end
+  checkpoints, keeps solver time and offsets all event forcing evaluations. Legacy/incomplete
+  checkpoints are rejected; the previous depth-only handoff has been removed.
 - Reorganized the README into an overview with installation/examples/testing links, preserving
   the complete beginner guide and adding detailed two-stage scientific/operational guidance.
 - Added a beginner walkthrough covering installation, widgets, sources, credentials, quality

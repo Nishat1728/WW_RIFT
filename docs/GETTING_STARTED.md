@@ -247,6 +247,11 @@ windows aligned with the simulation event.
 
 ### If something stops or looks wrong
 
+For two-stage runs, the duration controls above describe **event elapsed time**. The generated
+transient CFG continues the spin-up solver clock and applies a forcing-origin offset. It loads
+a complete hotstart, not a depth raster. Build the supplied solver integration before simulation;
+see [the two-stage guide](SPINUP_AND_TRANSIENT.md).
+
 | Symptom | What to do |
 |---|---|
 | `No module named riftprep` or another import | Activate the installed environment and choose its kernel; check that you installed the complete repository. |

@@ -23,12 +23,16 @@ are clamped to the target month's last day, so four months is not always 120 day
 an event starting 2024-06-30 gets a spin-up starting 2024-02-29.
 
 Uncheck the automatic window to enter dates manually. Spin-up end must equal event start; gaps
-and overlaps are rejected. Both phases use an elapsed solver clock beginning at zero; UTC
-windows are recorded separately in the YAML and `simulation_plan.json`.
+and overlaps are rejected. Spin-up solver time begins at zero. Transient solver time continues
+at the spin-up end; event forcings are evaluated at `solver_time - forcing.time_origin_s`.
+UTC windows and both clocks are recorded in the YAML and `simulation_plan.json`.
 
 Spin-up saves **once every 24 hours** by default (`86400` seconds). Change **Save every (hours)**
 to another positive interval if needed. Hotstart defaults ON and can be disabled separately
-from the transient setting. These controls govern **saved simulation output**, not daily rainfall.
+from the transient setting. These switches control **periodic** checkpoints. One exact-end spin-up
+checkpoint is mandatory for continuation even when periodic hotstarts are disabled. These controls
+govern **saved simulation output**, not daily rainfall. Checkpoints can be large; assess disk needs
+and use a suitable periodic cadence for regional grids.
 Spin-up rainfall and surge are disabled regardless of the event's selected sources.
 The chosen soil/infiltration and drainage physics remain enabled in spin-up where selected.
 Spin-up baseflow does not silently enable or replace event inflows. Enable and configure the
@@ -118,39 +122,49 @@ needed in this mode. Both methods preserve raw inputs and remain compatible with
 | `figures/processed_spinup_baseflow.png` | The constant hydrographs actually supplied to spin-up |
 | `RUN.md` | Case-specific solver instructions |
 
-The transient CFG references `simulation_ready/spinup_water_depth.asc`. This is deliberately a
+The transient CFG references `simulation_ready/spinup_hotstart.bin`. This is deliberately a
 **future runtime product**, absent during preparation. It is created only after spin-up runs.
-The input build passing does not mean that this simulation-dependent raster already exists.
+The input build passing does not mean that this simulation-dependent checkpoint already exists.
 
 ## 5. Run the solver in order
 
-After checking the maps and QC reports, install RIFT-UConn separately. From the generated case
+After checking the maps and QC reports, build RIFT-UConn with the
+[complete-restart integration](../integrations/rift_uconn/README.md). From the generated case
 directory, in an appropriately configured GPU job:
 
 ```bash
 riftprep simulate-stages . --executable /absolute/path/to/rift
 ```
 
-The command refuses nonempty result directories to prevent stale-output reuse. It runs spin-up,
-checks the exit code **and reported simulated duration**, validates the latest saved depth in
-`snapshot_index.csv`, creates the handoff raster, then runs the event. Logs are saved as
-`spinup_solver.log` and `transient_solver.log`. It never changes downloaded forcing.
+The command first checks the solver's complete-restart capabilities, then runs spin-up and checks
+its exit code **and reported duration**. It requires `final_hotstart.bin` at the exact phase end,
+checks its version, states, grid, finiteness and checksums, copies it unchanged to the transient
+restart path, then runs the event. It refuses nonempty result directories. Logs are saved as
+`spinup_solver.log` and `transient_solver.log`. Raw and processed forcing files are not rewritten.
 
-### Important handoff limitations
+### Complete-state continuation and clocks
 
-This is a **depth-only initialization**, not a complete coupled-state continuation. Solver
-cell depths are averaged onto the DEM-node input grid, with edge replication. Velocity,
-cumulative infiltration, soil moisture and urban storage are **not transferred**; the event
-uses its configured initial soil/storage settings. Review whether this is adequate for your study.
+The handoff uses `restart.hotstart`, not `initial.water_depth`. It preserves water-surface state,
+both momentum components, cumulative infiltration, dynamic soil saturation/moisture deficit,
+urban retained storage, and wet/active blocks. The versioned format also saves enabled diagnostic
+fields and mass-reference scalars. Static terrain and parameters are loaded from the same inputs;
+scratch arrays and the new phase's forcing buffers are rebuilt rather than treated as old forcing.
 
-The current solver saves on its output cadence and does not guarantee a snapshot exactly at its
-end time. Therefore the latest saved depth may be up to one output interval older than spin-up
-end. `quality_control/spinup_handoff.json` records the exact time, age, conversion and checksums;
-older states are rejected. Choose a shorter save interval if that age is unacceptable.
+The integration lands exactly on the phase end and writes a final checkpoint independently of
+the periodic save cadence. There is no stale-snapshot allowance, clock reset, state interpolation
+or silent depth-only fallback. `quality_control/spinup_handoff.json` records state names and hashes.
+The transient resets peak/arrival/mass diagnostic tallies for event reporting, while retaining
+physical momentum, infiltration history, soil saturation and stored urban water.
 
-Binary hotstarts retain the solver's time and timestep. They are saved ON by default for
-same-clock recovery, but attaching one directly to a zero-clock event would misalign forcing.
-The stage runner does not rewrite hotstart binaries or claim full hydrologic state continuity.
+For a 120-day spin-up followed by a 48-hour event, the transient CFG runs from solver time
+`10368000` to `10540800` seconds and sets `forcing.time_origin_s=10368000`. Its rainfall,
+hydrographs, coastal grids and external drainage still use event elapsed time `0..172800`.
+The offset is applied during every forcing evaluation, including initialization.
+
+Old unversioned solver checkpoints do not contain all supported states and are rejected. Rebuild
+the configuration and regenerate spin-up with the integrated solver; do not rename an old binary.
+The integration is source-layout guarded and tested for the documented RIFT-UConn version, not
+a claim of compatibility with every future solver or newly added physics module.
 
 ## YAML equivalent
 

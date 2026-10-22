@@ -1,4 +1,4 @@
-"""Rain-free, observed-low-flow spin-up and explicit depth-only event handoff.
+"""Rain-free, observed-low-flow spin-up and complete hotstart continuation.
 
 Daily-mean discharge quantiles are NOT groundwater baseflow separation and do not
 guarantee perennial flow. Raw observations are never clipped, filled or rewritten.
@@ -6,7 +6,6 @@ guarantee perennial flow. Raw observations are never clipped, filled or rewritte
 from __future__ import annotations
 
 import calendar
-import csv
 import json
 import math
 import re
@@ -251,7 +250,7 @@ def prepare_baseflow(spec, raw, grid, paths):
 
 
 def write_phase_configs(spec, paths, inputs, modules, baseflow_table):
-    """Write independent zero-clock phases; future runtime dependency is explicit."""
+    """Continue solver time; evaluate all event forcing on its own elapsed clock."""
     from .writers import build_rift_config
     spinup_inputs = {key: value for key, value in inputs.items()
                      if not key.startswith(("forcing.", "inflows.", "restart."))}
@@ -262,12 +261,20 @@ def write_phase_configs(spec, paths, inputs, modules, baseflow_table):
                          output_interval_s=spec.spinup.output_interval_s,
                          output_directory=spec.spinup.output_directory,
                          save_hotstart=spec.spinup.save_hotstart)
-    cfg = build_rift_config(paths.root / "rift_spinup.cfg", spinup_sim, spinup_inputs, spinup_modules)
-    handoff = (paths.simulation_ready / "spinup_water_depth.asc").relative_to(paths.root).as_posix()
-    event_inputs = {**inputs, "initial.water_depth": handoff}
-    event = build_rift_config(paths.root / "rift_case.cfg", spec.simulation, event_inputs, modules)
+    cfg = build_rift_config(paths.root / "rift_spinup.cfg", spinup_sim, spinup_inputs, spinup_modules,
+                            output_options={"output.final_hotstart": 1})
+    handoff = (paths.simulation_ready / "spinup_hotstart.bin").relative_to(paths.root).as_posix()
+    event_inputs = {key: value for key, value in inputs.items() if key != "initial.water_depth"}
+    event_inputs.update({"restart.hotstart": handoff, "restart.reset_diagnostics": 1,
+                         "forcing.time_origin_s": spec.spinup.duration_s})
+    duration = spec.simulation.end_time_s - spec.simulation.start_time_s
+    event_sim = replace(spec.simulation, start_time_s=spec.spinup.duration_s,
+                        end_time_s=spec.spinup.duration_s+duration)
+    event = build_rift_config(paths.root / "rift_case.cfg", event_sim, event_inputs, modules,
+                              output_options={"output.final_hotstart": int(spec.simulation.save_hotstart)})
     plan = {
-        "schema": "riftprep-two-stage-v1", "spinup_config": cfg.name,
+        "schema": "riftprep-two-stage-v2", "required_solver_contract": "rift-uconn-complete-restart-v1",
+        "spinup_config": cfg.name,
         "transient_config": event.name,
         "spinup_start_utc": spec.spinup.start_utc, "spinup_end_utc": spec.spinup.end_utc,
         "spinup_duration_s": spec.spinup.duration_s,
@@ -279,23 +286,27 @@ def write_phase_configs(spec, paths, inputs, modules, baseflow_table):
         "spinup_save_hotstart": spec.spinup.save_hotstart,
         "transient_output_interval_s": spec.simulation.output_interval_s,
         "transient_save_hotstart": spec.simulation.save_hotstart,
-        "handoff_depth": event_inputs["initial.water_depth"],
-        "handoff": "Latest saved depth only, after confirmed solver completion; clocks reset to zero. Velocities and soil/urban storage are NOT transferred.",
-        "maximum_snapshot_age_s": spec.spinup.output_interval_s,
-        "runtime_dependency": "Run riftprep simulate-stages before the transient CFG; the handoff raster is deliberately absent until spin-up has run.",
+        "handoff_hotstart": handoff,
+        "handoff": "Complete versioned binary state at the exact spin-up end; no interpolation or clock reset.",
+        "transient_solver_start_s": spec.spinup.duration_s,
+        "transient_solver_end_s": spec.spinup.duration_s+duration,
+        "forcing_time_origin_s": spec.spinup.duration_s,
+        "runtime_dependency": "Requires the WW_RIFT complete-restart solver integration and its final checkpoint. No legacy/depth fallback.",
     }
     (paths.root / "simulation_plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
     return event
 
 
 def run_stages(case_root: str | Path, executable: str | Path) -> Path:
-    """Run phases in order, verify solver completion, prepare depth, then event.
+    """Run phases in order, verify complete restart support, copy state, then event.
 
     Never assumes output 0001 is final or silently reuses old solver output.
     All paths below are confined to the explicitly selected generated case.
     """
     root = Path(case_root).resolve()
     plan = json.loads((root / "simulation_plan.json").read_text(encoding="utf-8"))
+    if plan.get("schema") != "riftprep-two-stage-v2":
+        raise ValueError("Rebuild the old depth-only configuration for complete hotstart continuation.")
     executable = str(Path(executable).expanduser().resolve())
     spinup_dir = _within(root, plan["spinup_output_directory"])
     if spinup_dir.exists() and any(spinup_dir.iterdir()):
@@ -304,6 +315,16 @@ def run_stages(case_root: str | Path, executable: str | Path) -> Path:
     event_path = _within(root, event_dir)
     if event_path.exists() and any(event_path.iterdir()):
         raise FileExistsError("Transient output directory is not empty; choose a new case.")
+    from .restart import CONTRACT, prepare_hotstart_handoff
+    try:
+        capability = subprocess.run([executable, "--restart-capabilities"], capture_output=True,
+                                    text=True, check=True)
+        support = json.loads(capability.stdout)
+        if (not isinstance(support, dict) or support.get("schema") != CONTRACT or not support.get("forcing_time_origin")
+                or not support.get("exact_final_checkpoint")):
+            raise ValueError("incomplete capabilities")
+    except (subprocess.SubprocessError, ValueError, OSError) as error:
+        raise RuntimeError("RIFT solver lacks the complete-restart integration. See integrations/rift_uconn/README.md; no partial-state fallback is allowed.") from error
     spinup_dir.mkdir(parents=True, exist_ok=True)
     log = root / "spinup_solver.log"
     with log.open("w", encoding="utf-8") as stream:
@@ -313,7 +334,7 @@ def run_stages(case_root: str | Path, executable: str | Path) -> Path:
     summaries = re.findall(r"\[summary\][^\n]*simulated_s=([0-9.eE+\-]+)", text)
     if completed.returncode or not summaries or float(summaries[-1]) < plan["spinup_duration_s"] - 1e-3:
         raise RuntimeError(f"Spin-up did not confirm completion of its requested duration. Inspect {log}.")
-    depth = prepare_depth_handoff(root, plan)
+    hotstart = prepare_hotstart_handoff(root, plan)
     event_path.mkdir(parents=True, exist_ok=True)
     with (root / "transient_solver.log").open("w", encoding="utf-8") as stream:
         subprocess.run([executable, plan["transient_config"]], cwd=root,
@@ -322,7 +343,7 @@ def run_stages(case_root: str | Path, executable: str | Path) -> Path:
     summaries = re.findall(r"\[summary\][^\n]*simulated_s=([0-9.eE+\-]+)", text)
     if not summaries or float(summaries[-1]) < plan["transient_duration_s"] - 1e-3:
         raise RuntimeError("Transient solver did not confirm completion. Inspect transient_solver.log.")
-    return depth
+    return hotstart
 
 
 def _within(root: Path, relative: str) -> Path:
@@ -337,53 +358,3 @@ def _config_output(path: Path) -> str:
     config = configparser.ConfigParser()
     config.read(path)
     return config["outputs"]["output.directory"]
-
-
-def prepare_depth_handoff(root: Path, plan: dict[str, Any]) -> Path:
-    """Validate latest saved solver depth; record its actual time and state age."""
-    import numpy as np
-    import rasterio
-    from .artifacts import sha256
-    from .config import GridSpec
-    from .writers import write_esri_ascii
-    from .spatial import _grid_transform
-
-    output = _within(root, plan["spinup_output_directory"])
-    with (output / "snapshot_index.csv").open(newline="", encoding="utf-8") as stream:
-        rows = list(csv.DictReader(stream))
-    if not rows:
-        raise ValueError("Spin-up has no saved snapshots.")
-    latest = max(rows, key=lambda item: float(item["simulation_time_s"]))
-    stamp = float(latest["simulation_time_s"])
-    age = plan["spinup_duration_s"] - stamp
-    if not math.isfinite(age) or age < -1 or age > plan["maximum_snapshot_age_s"] + 1:
-        raise ValueError("Latest saved spin-up depth is outside the allowed output-cadence age.")
-    source = _within(output, latest["water_depth_file"])
-    target = _within(root, plan["handoff_depth"])
-    grid = GridSpec(**json.loads((root / "quality_control" / "grid.json").read_text()))
-    # Solver outputs are cell-centred; RIFT initial.water_depth expects DEM nodes.
-    # Averaging extends the half-cell rim, preserving nonnegative depth.
-    with rasterio.open(source) as src:
-        values = src.read(1)
-        if (not np.isfinite(values).all() or np.any(values < 0)
-                or values.shape != grid.cell_shape
-                or not np.isclose(abs(src.transform.a), grid.resolution)):
-            raise ValueError("Spin-up depth is invalid or does not match the case cell grid.")
-        expected = _grid_transform(grid, "cell")
-        if not src.transform.almost_equals(expected):
-            raise ValueError("Spin-up depth extent does not match the case cell grid.")
-        # Explicit cell-to-node average with edge replication, no extrapolated flow.
-        padded = np.pad(values.astype(float), 1, mode="edge")
-        nodes = (padded[:-1, :-1] + padded[1:, :-1] + padded[:-1, 1:] + padded[1:, 1:]) / 4
-        nodes = nodes[:grid.ny+1, :grid.nx+1]
-    temporary = target.with_suffix(".pending.asc")
-    write_esri_ascii(temporary, nodes, grid)
-    temporary.replace(target)
-    receipt = {"status": "PASSED", "source": str(source), "source_sha256": sha256(source),
-               "target": str(target), "target_sha256": sha256(target),
-               "snapshot_time_s": stamp, "snapshot_age_s": age,
-               "transfer": "cell-to-node mean; edge cells replicated; depth only",
-               "velocities_transferred": False, "soil_state_transferred": False,
-               "urban_storage_transferred": False}
-    (root / "quality_control" / "spinup_handoff.json").write_text(json.dumps(receipt, indent=2))
-    return target

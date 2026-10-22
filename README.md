@@ -7,9 +7,10 @@ A notebook-led, raw-first Python workflow for preparing quality-controlled input
 Choose a study area and data sources in graphical controls; source managers download products,
 preserve raw files, check them, and prepare the grids and forcing the solver reads.
 
-Inspired by [Watershed Workflow](https://github.com/environmental-modeling-workflows/watershed-workflow),
-this project similarly separates notebooks, source managers, processing and verification.
-It is a separate RIFT-oriented project, not an official Watershed Workflow distribution.
+RIFT Input Builder prepares simulation-ready inputs for RIFT using
+[Watershed Workflow](https://github.com/environmental-modeling-workflows/watershed-workflow) and other
+data-source adapters. The notebook provides a simple interface for selecting sources,
+downloading data, and checking the resulting inputs.
 
 ![Example 30 m DEM preparation](examples/demo_dem.png)
 
@@ -70,10 +71,13 @@ Missing days are not filled, real zeros remain zero, and coverage is reported (d
 This is a low-flow proxy, **not guaranteed perennial flow**, groundwater-baseflow separation or
 an ungauged discharge estimate. No gauge or manual flow is selected on your behalf.
 
-The generated `RUN.md` explains `riftprep simulate-stages`. Handoff is **depth only**, not full
-soil/velocity/storage continuity. It selects the latest saved depth, discloses its age (at most
-one output interval), and resets the event clock. Binary hotstarts retain the solver clock and
-cannot simply replace this handoff. Preparing inputs does not execute or equilibrate the model.
+The generated `RUN.md` explains `riftprep simulate-stages`. The event uses **`restart.hotstart`**
+from the exact spin-up end, retaining momentum, infiltration history, soil saturation and urban
+storage without interpolation. The solver clock continues; a forcing-origin offset aligns all
+event inputs without modifying their files. Event diagnostic statistics are reset, not physical state.
+This requires the supplied [RIFT-UConn restart integration](integrations/rift_uconn/README.md);
+unpatched solvers and incomplete/legacy checkpoints are rejected. Periodic hotstarts remain
+optional, but a final spin-up checkpoint is mandatory. Preparation does not execute or equilibrate the model.
 
 ## Raw-first workflow and quality control
 
@@ -124,7 +128,10 @@ python tools/build_general_notebook.py
 ```
 
 CI runs offline unit/fixture integration tests on Python 3.11 and 3.12, including two-phase CFGs,
-quantiles, raw preservation and failure gates. Network tests are opt-in:
+quantiles, raw preservation, complete-state binary I/O and failure gates. A
+[synthetic GPU restart check](examples/complete_restart_validation.json) passed with identical
+split/uninterrupted results in 17 checked fields; this is not a full four-month basin run.
+Network tests are opt-in:
 `python -m hpc.validate_spinup_history /new/test/directory` downloads a 20-year gauge record.
 It does not run the GPU solver. Provider outages and full GPU simulations need separate checks.
 
