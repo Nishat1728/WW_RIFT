@@ -16,7 +16,9 @@ from pyproj import Transformer
 from shapely.geometry import box
 from shapely.ops import nearest_points, unary_union
 
-from .artifacts import ProvenanceLedger, TimingLedger, prepare_case_directory
+from .artifacts import (
+    ProvenanceLedger, TimingLedger, prepare_case_directory, redact_sensitive,
+)
 from .config import GridSpec, ProjectPaths
 from .drainage import build_drainage_parameter_table, rasterize_drainage_features
 from .managers import (
@@ -54,6 +56,7 @@ from .spatial import (
     create_domain_masks,
 )
 from .spec import CaseSpec, ProductSpec, load_case, save_case
+from .run_manifest import RunManifestWriter
 from .validation import ValidationReport, validate_case
 from .writers import (
     build_rift_config,
@@ -74,6 +77,10 @@ class CaseResult:
     raw_catalog_path: Path
     ok: bool
 
+    @property
+    def run_manifest_path(self) -> Path:
+        return self.case_root / "quality_control" / "provenance" / "run_manifest.json"
+
 
 @dataclass(frozen=True)
 class RawDownloadResult:
@@ -86,6 +93,17 @@ class RawDownloadResult:
     summary_path: Path
     timing_csv_path: Path
     raw_catalog_path: Path
+    run_id: str | None = None
+    run_started_utc: str | None = None
+
+    @property
+    def acquisition_events_path(self) -> Path:
+        """Additive provenance path without changing the constructor contract."""
+        return self.paths.provenance / "acquisition_events.json"
+
+    @property
+    def run_manifest_path(self) -> Path:
+        return self.paths.provenance / "run_manifest.json"
 
 
 def _rel(root: Path, path: str | Path) -> str:
@@ -143,7 +161,14 @@ def _resolve_outlet_spec(
     if outlet_spec is None or outlet_spec.source != "auto_hydrography_lowest":
         return outlet_spec
     if rivers is None or rivers.empty:
-        raise ValueError("auto_hydrography_lowest requires enabled, nonempty hydrography.")
+        (paths.quality_control / "derived_outlet.json").write_text(json.dumps({
+            "method": "auto_hydrography_lowest",
+            "status": "NO_HYDROGRAPHY",
+            "candidate_count": 0,
+            "action": "Outlet carving skipped because the provider-confirmed hydrography product is empty.",
+            "user_action": "Provide coordinate outlets if an explicit outlet is required.",
+        }, indent=2), encoding="utf-8")
+        return None
     domain_edge = unary_union(boundary.to_crs(grid.crs).geometry).boundary
     river_data = rivers.to_crs(grid.crs)
     candidates = []
@@ -350,7 +375,7 @@ def _prepare_inflows(
                            "ymin_m": y - width / 2, "ymax_m": y + width / 2})
         sources.append(source)
         plotted[source["id"]] = (elapsed, values)
-    table = write_hydrograph_bundle(paths.inputs / "hydrographs", sources)
+    table = write_hydrograph_bundle(paths.simulation_ready / "hydrographs", sources)
     return table, plotted
 
 
@@ -386,7 +411,7 @@ def _prepare_coastal(
     x, y = _support_xy(station, series, grid)
     surrogate = frame.rename(columns={"stage_m": "stage_m_navd88"})
     sampled, _, _ = prepare_surge_grids(
-        surrogate, dem, node_mask, (x, y), grid, paths.inputs / "surge",
+        surrogate, dem, node_mask, (x, y), grid, paths.simulation_ready / "surge",
         interval_hours=int(product.options.get("interval_hours", 1)),
         coastal_radius_m=float(product.options.get("coastal_radius_m", 3000.0)),
     )
@@ -405,7 +430,7 @@ def _prepare_drainage(
         if impervious is None:
             raise ValueError("synthetic_nlcd drainage requires selected land-cover imperviousness.")
         return prepare_synthetic_drainage(
-            impervious, node_mask, grid, paths.inputs,
+            impervious, node_mask, grid, paths.simulation_ready,
             float(product.options.get("impervious_threshold_pct", 80.0)),
         )
     controls = build_drainage_parameter_table(product.options["controls"])
@@ -425,8 +450,10 @@ def _prepare_drainage(
     else:
         raise ValueError(f"Unsupported processed drainage provider: {product.provider}")
     from .writers import write_esri_ascii
-    map_path = write_esri_ascii(paths.inputs / "urban_drain_type.asc", drainage_map, grid)
-    table_path = paths.inputs / "urban_hydraulic_controls.csv"
+    map_path = write_esri_ascii(
+        paths.simulation_ready / "urban_drain_type.asc", drainage_map, grid
+    )
+    table_path = paths.simulation_ready / "urban_hydraulic_controls.csv"
     controls.to_csv(table_path, index=False)
     return drainage_map, controls, map_path, table_path
 
@@ -459,11 +486,15 @@ class RIFTInputBuilder:
             if isinstance(spec_or_path, (str, Path))
             else spec_or_path
         )
+        preexisting_case = self.spec.case_root.exists()
         self.paths = prepare_case_directory(self.spec.case_root, self.spec.cache.mode)
         _configure_case_http_cache(self.paths)
         self.ledger = ProvenanceLedger(self.paths.provenance)
         self.timings = TimingLedger(self.paths.timings)
         save_case(self.spec, self.paths.quality_control / "resolved_case.yaml")
+        self.run_manifest = RunManifestWriter(
+            self.spec, self.paths, preexisting_case=preexisting_case
+        )
         self.boundary: gpd.GeoDataFrame | None = None
         self.grid: GridSpec | None = None
         self.products: dict[str, RawProduct] = {}
@@ -491,12 +522,16 @@ class RIFTInputBuilder:
     def load_domain(self) -> gpd.GeoDataFrame:
         """Download/load the selected boundary and construct the requested RIFT grid."""
         if self.boundary is None:
-            with self.timings.stage("resolve_boundary"):
-                self.boundary = resolve_boundary(self.spec, self.paths, self.ledger)
-                self.grid = build_grid(self.spec.domain, self.boundary)
-                (self.paths.quality_control / "grid.json").write_text(
-                    json.dumps(self.grid.as_dict(), indent=2), encoding="utf-8"
-                )
+            try:
+                with self.timings.stage("resolve_boundary"):
+                    self.boundary = resolve_boundary(self.spec, self.paths, self.ledger)
+                    self.grid = build_grid(self.spec.domain, self.boundary)
+                    (self.paths.quality_control / "grid.json").write_text(
+                        json.dumps(self.grid.as_dict(), indent=2), encoding="utf-8"
+                    )
+            except BaseException as error:
+                self.run_manifest.fail(error, "resolve_boundary")
+                raise
         return self.boundary
 
     def download(self, name: str) -> RawProduct:
@@ -507,19 +542,23 @@ class RIFTInputBuilder:
             return self.products[name]
         boundary = self.load_domain()
         assert self.grid is not None
-        product = acquire_raw_product(
-            name,
-            self.spec,
-            self.paths,
-            self.ledger,
-            boundary,
-            self.timings.stage,
-            query_geometry=_query_geometry(self.grid),
-        )
-        qc_path = self.paths.quality_control / "input_qc" / f"{name}.json"
-        self.input_qc[name] = check_raw_product(
-            name, product, getattr(self.spec, name).options, qc_path
-        )
+        try:
+            product = acquire_raw_product(
+                name,
+                self.spec,
+                self.paths,
+                self.ledger,
+                boundary,
+                self.timings.stage,
+                query_geometry=_query_geometry(self.grid),
+            )
+            qc_path = self.paths.quality_control / "input_qc" / f"{name}.json"
+            self.input_qc[name] = check_raw_product(
+                name, product, getattr(self.spec, name).options, qc_path
+            )
+        except BaseException as error:
+            self.run_manifest.fail(error, f"download_raw_{name}")
+            raise
         self.products[name] = product
         return product
 
@@ -543,10 +582,12 @@ class RIFTInputBuilder:
         """Validate that every enabled manager ran before processing can start."""
         missing = set(self.selected_products) - set(self.products)
         if missing:
-            raise RuntimeError(
+            error = RuntimeError(
                 "Run the visible download cells for all enabled inputs first; missing "
                 f"{sorted(missing)}."
             )
+            self.run_manifest.fail(error, "raw_download_incomplete")
+            raise error
         assert self.grid is not None and self.boundary is not None
         catalog = RawCatalog(boundary=self.boundary, products=dict(self.products))
         summary_path = self.paths.quality_control / "raw_download_complete.json"
@@ -573,7 +614,16 @@ class RIFTInputBuilder:
                 for name, result in self.input_qc.items()
             },
             "processing_started": False,
+            "provenance": {
+                "raw_products": str(self.paths.provenance / "raw_products.json"),
+                "acquisition_events": str(
+                    self.paths.provenance / "acquisition_events.json"
+                ),
+                "run_manifest": str(self.run_manifest.latest_path),
+                "run_manifest_history": str(self.run_manifest.history_path),
+            },
         }, indent=2), encoding="utf-8")
+        self.run_manifest.raw_complete()
         return RawDownloadResult(
             spec=self.spec,
             paths=self.paths,
@@ -582,6 +632,8 @@ class RIFTInputBuilder:
             summary_path=summary_path,
             timing_csv_path=self.paths.timings / "wall_clock.csv",
             raw_catalog_path=self.paths.provenance / "raw_products.json",
+            run_id=self.run_manifest.run_id,
+            run_started_utc=self.run_manifest.started_utc,
         )
 
 
@@ -594,24 +646,39 @@ def download_raw_inputs(spec_or_path: CaseSpec | str | Path) -> RawDownloadResul
 
 def build_rift_inputs(downloaded: RawDownloadResult) -> CaseResult:
     """Build RIFT files from the exact raw catalog saved by ``download_raw_inputs``."""
-    result = run_case(downloaded.spec, _downloaded=downloaded)
+    try:
+        result = run_case(downloaded.spec, _downloaded=downloaded)
+    except BaseException as error:
+        payload = json.loads(downloaded.summary_path.read_text(encoding="utf-8"))
+        payload["processing_started"] = True
+        payload["processing_complete"] = False
+        payload["processing_failure"] = {
+            "type": type(error).__name__,
+            "message": redact_sensitive(str(error)),
+        }
+        downloaded.summary_path.write_text(
+            json.dumps(payload, indent=2), encoding="utf-8"
+        )
+        raise
     save_case(downloaded.spec, downloaded.paths.quality_control / "resolved_case.yaml")
     payload = json.loads(downloaded.summary_path.read_text(encoding="utf-8"))
     payload["processing_started"] = True
     payload["processing_complete"] = result.ok
+    payload["run_manifest"] = str(result.run_manifest_path)
     downloaded.summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return result
 
 
-def run_case(
+def _run_case_impl(
     spec_or_path: CaseSpec | str | Path,
     *,
     _downloaded: RawDownloadResult | None = None,
+    _paths: ProjectPaths | None = None,
 ) -> CaseResult:
     """Download all selected raw products, then build and validate RIFT inputs."""
     spec = load_case(spec_or_path) if isinstance(spec_or_path, (str, Path)) else spec_or_path
     if _downloaded is None:
-        paths = prepare_case_directory(spec.case_root, spec.cache.mode)
+        paths = _paths or prepare_case_directory(spec.case_root, spec.cache.mode)
         _configure_case_http_cache(paths)
         ledger = ProvenanceLedger(paths.provenance)
         timings = TimingLedger(paths.timings)
@@ -653,6 +720,13 @@ def run_case(
         dem = align_raster(raw_dem.files["raster"], grid, "node", "bilinear")
         if np.any(~np.isfinite(dem[node_mask])):
             raise ValueError("Selected raw DEM does not cover every active RIFT node.")
+        processed_dem_dir = paths.processed / "dem"
+        aligned_dem_path = write_esri_ascii(
+            processed_dem_dir / "dem_aligned_to_rift_grid.asc", dem, grid
+        )
+        derived_dem_paths: dict[str, Path] = {
+            "aligned_to_rift_grid": aligned_dem_path,
+        }
         rivers = None
         burn_depth = np.zeros_like(dem)
         needs_rivers = (
@@ -665,23 +739,63 @@ def run_case(
             dem, burn_depth = burn_river_bathymetry(
                 dem, rivers, node_mask, grid, spec.river_bathymetry
             )
+            derived_dem_paths["after_river_bathymetry"] = write_esri_ascii(
+                processed_dem_dir / "dem_after_river_bathymetry.asc", dem, grid
+            )
         original_dem = dem.copy()
         carved = np.zeros_like(node_mask, dtype=bool)
+        outlet_features = None
+        resolved_outlets = None
         if spec.domain.outside_dem_mode == "wall":
             final_dem = apply_closed_huc_wall(dem, node_mask, spec.domain.wall_elevation_m)
             if spec.outlets is not None:
                 resolved_outlets = _resolve_outlet_spec(
                     spec.outlets, boundary, rivers, original_dem, grid, paths
                 )
-                final_dem, outlet_features, carved = carve_outlets(
-                    final_dem, original_dem, node_mask, grid, resolved_outlets,
-                    spec.domain.wall_elevation_m,
-                )
+                if resolved_outlets is not None:
+                    final_dem, outlet_features, carved = carve_outlets(
+                        final_dem, original_dem, node_mask, grid, resolved_outlets,
+                        spec.domain.wall_elevation_m,
+                    )
         else:
             if not np.isfinite(dem).all():
                 raise ValueError("outside_dem_mode='real_terrain' requires DEM coverage of the entire grid.")
             final_dem = dem
-        dem_path = write_esri_ascii(paths.inputs / "dem.asc", final_dem, grid)
+        dem_path = write_esri_ascii(
+            paths.simulation_ready / "dem.asc", final_dem, grid
+        )
+        raw_dem_paths = {
+            name: str(Path(path).resolve())
+            for name, path in raw_dem.files.items()
+            if name != "plot"
+            and Path(path).resolve().is_relative_to(paths.raw.resolve())
+        }
+        (paths.quality_control / "dem_lineage.json").write_text(
+            json.dumps({
+                "schema": "riftprep-dem-lineage-v1",
+                "provider": raw_dem.provider,
+                "raw_provider_artifacts": raw_dem_paths,
+                "source_raster_used_for_alignment": str(
+                    Path(raw_dem.files["raster"]).resolve()
+                ),
+                "source_raster_is_raw": Path(raw_dem.files["raster"]).resolve().is_relative_to(
+                    paths.raw.resolve()
+                ),
+                "derived_intermediates": {
+                    name: str(path.resolve()) for name, path in derived_dem_paths.items()
+                },
+                "simulation_ready_dem": str(dem_path.resolve()),
+                "rift_grid_crs": grid.crs,
+                "rift_grid_cell_size_m": grid.resolution,
+                "processing": {
+                    "alignment_resampling": "bilinear",
+                    "river_bathymetry_applied": spec.river_bathymetry.apply_bathymetry,
+                    "outside_dem_mode": spec.domain.outside_dem_mode,
+                    "outlet_carving_applied": bool(carved.any()),
+                },
+            }, indent=2),
+            encoding="utf-8",
+        )
         initial_source = raw.require("initial_state")
         if spec.initial_state.provider == "local":
             initial_depth = align_raster(
@@ -711,7 +825,7 @@ def run_case(
             )
         initial_depth = np.where(node_mask, initial_depth, 0.0)
         initial_depth_path = write_esri_ascii(
-            paths.inputs / "initial_water_depth_m.asc", initial_depth, grid
+            paths.simulation_ready / "initial_water_depth_m.asc", initial_depth, grid
         )
 
     cover = impervious = canopy = manning = None
@@ -724,7 +838,8 @@ def run_case(
                 raise ValueError(f"RIFT land processing needs cover, impervious, canopy; missing {sorted(missing)}")
             cover, impervious, canopy, manning, land_paths = prepare_nlcd(
                 raw_lc.files["cover"], raw_lc.files["impervious"], raw_lc.files["canopy"],
-                grid, node_mask, paths.inputs, year=raw_lc.metadata.get("year", "selected"),
+                grid, node_mask, paths.simulation_ready,
+                year=raw_lc.metadata.get("year", "selected"),
                 coverage_report_path=paths.quality_control / "land_cover_coverage.json",
                 manual_fill_values=spec.land_cover.options.get("manual_fill_values", {}),
             )
@@ -744,7 +859,7 @@ def run_case(
                 else soil_raw.files["vector"]
             )
             ksat, porosity, suction, initial_saturation, soil_paths, soil_scalars = prepare_ssurgo(
-                soil_source, grid, node_mask, paths.inputs,
+                soil_source, grid, node_mask, paths.simulation_ready,
                 float(spec.soil.options.get("initial_saturation", 0.5)),
                 coverage_report_path=paths.quality_control / "soil_coverage.json",
                 manual_fill_values=spec.soil.options.get("manual_fill_values", {}),
@@ -757,7 +872,7 @@ def run_case(
     rainfall_summary = accumulation = rainfall_times = None
     if spec.rainfall.enabled:
         with timings.stage("process_rainfall"):
-            rainfall_path = paths.inputs / "rainfall_ats.h5"
+            rainfall_path = paths.simulation_ready / "rainfall_ats.h5"
             rainfall_summary, accumulation, rainfall_times = prepare_aorc_event(
                 raw.require("rainfall").files["netcdf"],
                 paths.processed / "rainfall_selected_event.nc",
@@ -890,7 +1005,10 @@ def run_case(
             "inflows.table": _rel(paths.root, inflow_table) if inflow_table else None,
             "drainage.infrastructure_map": _rel(paths.root, drainage_map_path) if drainage_map_path else None,
             "drainage.parameter_table": _rel(paths.root, drainage_table_path) if drainage_table_path else None,
-            "forcing.surge_grid_prefix": "rift_inputs/surge/surge" if surge_sampled is not None else None,
+            "forcing.surge_grid_prefix": (
+                _rel(paths.root, paths.simulation_ready / "surge" / "surge")
+                if surge_sampled is not None else None
+            ),
             "forcing.surge_grid_interval_s": int(spec.coastal.options.get("interval_hours", 1)) * 3600 if surge_sampled is not None else None,
             "forcing.surge_grid_end_time_s": float(surge_sampled.time_s.iloc[-1]) if surge_sampled is not None else None,
         }
@@ -953,6 +1071,12 @@ def run_case(
         "qc_report": str(qc_json_path),
         "input_status_summary": str(input_status_json),
         "wall_clock": str(paths.timings / "wall_clock.csv"),
+        "raw_product_provenance": str(paths.provenance / "raw_products.json"),
+        "acquisition_events": str(paths.provenance / "acquisition_events.json"),
+        "run_provenance_manifest": str(
+            paths.provenance / "run_manifest.json"
+        ),
+        "directory_contract": paths.directory_contract(),
     })
     return CaseResult(
         paths.root, config_path, manifest_path, qc_json_path,
@@ -960,3 +1084,41 @@ def run_case(
         paths.provenance / "raw_products.json",
         True,
     )
+
+
+def run_case(
+    spec_or_path: CaseSpec | str | Path,
+    *,
+    _downloaded: RawDownloadResult | None = None,
+) -> CaseResult:
+    """Run one provenance-tracked workflow attempt and preserve terminal state."""
+    spec = (
+        load_case(spec_or_path)
+        if isinstance(spec_or_path, (str, Path))
+        else spec_or_path
+    )
+    if _downloaded is not None:
+        paths = _downloaded.paths
+        if _downloaded.run_id and _downloaded.run_started_utc:
+            run_manifest = RunManifestWriter.reopen(
+                spec, paths, _downloaded.run_id, _downloaded.run_started_utc
+            )
+        else:
+            run_manifest = RunManifestWriter(
+                spec, paths, preexisting_case=True
+            )
+    else:
+        preexisting_case = spec.case_root.exists()
+        paths = prepare_case_directory(spec.case_root, spec.cache.mode)
+        run_manifest = RunManifestWriter(
+            spec, paths, preexisting_case=preexisting_case
+        )
+    try:
+        result = _run_case_impl(
+            spec, _downloaded=_downloaded, _paths=paths
+        )
+    except BaseException as error:
+        run_manifest.fail(error)
+        raise
+    run_manifest.complete()
+    return result

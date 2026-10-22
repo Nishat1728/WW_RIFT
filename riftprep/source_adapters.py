@@ -124,17 +124,24 @@ def download_copernicus_glo30(
     boundary: gpd.GeoDataFrame,
     raw_dir: str | Path,
     *,
+    processed_dir: str | Path | None = None,
     reuse_existing: bool = False,
     max_attempts: int = 5,
 ) -> tuple[dict[str, Path], dict[str, Any]]:
-    """Download public Copernicus DEM GLO-30 COG tiles and make a native mosaic."""
+    """Preserve public GLO-30 COG tiles and build a derived source mosaic."""
     raw_dir = Path(raw_dir)
+    processed_dir = (
+        raw_dir.parent / "processed" / "dem" / "copernicus_glo30"
+        if processed_dir is None else Path(processed_dir)
+    )
+    processed_dir.mkdir(parents=True, exist_ok=True)
     tile_dir = raw_dir / "tiles"
     tile_dir.mkdir(parents=True, exist_ok=True)
     xmin, ymin, xmax, ymax = boundary.to_crs("EPSG:4326").total_bounds
     longitudes = range(int(np.floor(xmin)), int(np.ceil(xmax)))
     latitudes = range(int(np.floor(ymin)), int(np.ceil(ymax)))
     files: dict[str, Path] = {}
+    source_urls: dict[str, str] = {}
     tile_paths: list[Path] = []
     missing_tiles: list[str] = []
     for latitude in latitudes:
@@ -157,12 +164,14 @@ def download_copernicus_glo30(
                     missing_tiles.append(code)
                     continue
                 raise
-            files[f"source_tile_{len(tile_paths) + 1:04d}"] = destination
+            artifact_key = f"source_tile_{len(tile_paths) + 1:04d}"
+            files[artifact_key] = destination
+            source_urls[artifact_key] = url
             tile_paths.append(destination)
     if not tile_paths:
         raise LookupError("Copernicus GLO-30 returned no public DEM tile for the domain.")
 
-    mosaic_path = raw_dir / "copernicus_glo30_native_mosaic.tif"
+    mosaic_path = processed_dir / "copernicus_glo30_source_mosaic.tif"
     if not (reuse_existing and mosaic_path.is_file()):
         sources = [rasterio.open(path) for path in tile_paths]
         try:
@@ -190,8 +199,11 @@ def download_copernicus_glo30(
         "resolution_m": 30,
         "source_tile_count": len(tile_paths),
         "missing_public_tiles": missing_tiles,
+        "source_urls": source_urls,
+        "raw_artifact_semantics": "Unmodified public Copernicus GLO-30 COG tiles",
         "raw_source_tiles_modified": False,
         "mosaic_is_derived": True,
+        "derived_mosaic": str(mosaic_path.resolve()),
     }
 
 
@@ -343,9 +355,12 @@ def download_daymet_hourly(
     options: dict[str, Any],
     raw_dir: str | Path,
     *,
+    processed_dir: str | Path | None = None,
     reuse_existing: bool = False,
 ) -> tuple[dict[str, Path], dict[str, Any]]:
     """Download Daymet daily precipitation and explicitly distribute it over 24 hours."""
+    processed_dir = Path(raw_dir) if processed_dir is None else Path(processed_dir)
+    processed_dir.mkdir(parents=True, exist_ok=True)
     if str(options.get("daily_distribution", "uniform_24h")) != "uniform_24h":
         raise ValueError(
             "Daymet currently requires daily_distribution='uniform_24h'; "
@@ -433,7 +448,7 @@ def download_daymet_hourly(
         },
     )
     standardized["APCP_surface"].attrs.update(units="mm", interval="1 hour")
-    normalized_path = raw_dir / "daymet_hourly_adapter_output.nc"
+    normalized_path = processed_dir / "daymet_hourly_adapter_output.nc"
     standardized.to_netcdf(normalized_path)
     standardized.close()
     daily.close()
@@ -563,12 +578,14 @@ def download_mrms_hourly(
     options: dict[str, Any],
     raw_dir: str | Path,
     *,
+    processed_dir: str | Path | None = None,
     reuse_existing: bool = False,
 ) -> tuple[dict[str, Path], dict[str, Any]]:
     """Download NOAA MRMS one-hour QPE files and create a domain subset NetCDF."""
     raw_dir = Path(raw_dir)
+    processed_dir = raw_dir if processed_dir is None else Path(processed_dir)
     compressed_dir = raw_dir / "provider_grib2_gz"
-    decoded_dir = raw_dir / "decoded_grib2"
+    decoded_dir = processed_dir / "decoded_grib2"
     compressed_dir.mkdir(parents=True, exist_ok=True)
     decoded_dir.mkdir(parents=True, exist_ok=True)
     start = _utc_naive(options["start_utc"])
@@ -636,7 +653,7 @@ def download_mrms_hourly(
         },
     )
     standardized["APCP_surface"].attrs.update(units="mm", interval="1 hour")
-    normalized_path = raw_dir / "mrms_hourly_domain_subset.nc"
+    normalized_path = processed_dir / "mrms_hourly_domain_subset.nc"
     standardized.to_netcdf(normalized_path)
     standardized.close()
     files["netcdf"] = normalized_path
@@ -653,6 +670,7 @@ def download_era5_land_hourly(
     options: dict[str, Any],
     raw_dir: str | Path,
     *,
+    processed_dir: str | Path | None = None,
     reuse_existing: bool = False,
 ) -> tuple[dict[str, Path], dict[str, Any]]:
     """Download ERA5-Land hourly accumulated precipitation and de-accumulate it."""
@@ -663,7 +681,9 @@ def download_era5_land_hourly(
             "ERA5-Land requires cdsapi. Install riftprep[era5] and configure ~/.cdsapirc."
         ) from error
     raw_dir = Path(raw_dir)
+    processed_dir = raw_dir if processed_dir is None else Path(processed_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir.mkdir(parents=True, exist_ok=True)
     start = _utc_naive(options["start_utc"])
     end = _utc_naive(options["end_utc"])
     request_start = start.normalize() - pd.Timedelta(days=1)
@@ -759,7 +779,7 @@ def download_era5_land_hourly(
         },
     )
     standardized["APCP_surface"].attrs.update(units="mm", interval="1 hour")
-    normalized_path = raw_dir / "era5_land_hourly_adapter_output.nc"
+    normalized_path = processed_dir / "era5_land_hourly_adapter_output.nc"
     standardized.to_netcdf(normalized_path)
     standardized.close()
     data.close()
@@ -790,12 +810,14 @@ def download_soilgrids_hydraulic(
     options: dict[str, Any],
     raw_dir: str | Path,
     *,
+    processed_dir: str | Path | None = None,
     reuse_existing: bool = False,
 ) -> tuple[dict[str, Path], dict[str, Any]]:
     """Download SoilGrids properties and derive documented RIFT hydraulic rasters."""
     raw_dir = Path(raw_dir)
+    processed_dir = raw_dir if processed_dir is None else Path(processed_dir)
     provider_dir = raw_dir / "provider_wcs"
-    derived_dir = raw_dir / "hydraulic_adapter"
+    derived_dir = processed_dir / "hydraulic_adapter"
     provider_dir.mkdir(parents=True, exist_ok=True)
     depth = str(options.get("depth", "0-5cm"))
     quantile = str(options.get("quantile", "Q0.5"))

@@ -339,10 +339,13 @@ def query_arcgis_features(
 
 
 def get_usgs_3dhp_flowlines(boundary: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Download current USGS 3DHP flowlines intersecting a boundary envelope."""
+    """Download current USGS 3DHP flowlines intersecting a boundary envelope.
+
+    An empty provider response is a valid, explicit zero-feature result for
+    domains where the service confirms that no flowlines intersect the query.
+    The caller records that condition in the raw-product metadata and keeps an
+    empty GeoPackage, rather than converting it into an implicit failure.
+    """
     bounds = tuple(float(value) for value in boundary.to_crs(4326).total_bounds)
     url = "https://3dhp.nationalmap.gov/arcgis/rest/services/usgs_3dhp_all/FeatureServer/50"
-    flowlines = query_arcgis_features(url, bounds)
-    if flowlines.empty:
-        raise LookupError("USGS 3DHP returned no flowlines for the domain.")
-    return flowlines
+    return query_arcgis_features(url, bounds)

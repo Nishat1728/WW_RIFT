@@ -1,18 +1,22 @@
 """Raw-first source managers patterned after Watershed Workflow managers.
 
-Every adapter returns files in ``raw/``.  No RIFT-grid interpolation happens in
-this module; source resolution and model resolution are intentionally separate.
+Provider/source-grid snapshots are retained in ``raw/``. Optional adapters may
+also return reproducible normalized products in ``processed/``. No final RIFT
+file is written here; source resolution and model resolution stay separate.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Iterable
@@ -25,6 +29,7 @@ import pandas as pd
 import rasterio
 import requests
 import xarray as xr
+from pyproj import CRS
 from rasterio.enums import Resampling
 from rasterio.merge import merge as merge_rasters
 from requests.adapters import HTTPAdapter
@@ -45,20 +50,176 @@ from .source_adapters import (
 from .spec import CaseSpec, ProductSpec
 
 
+def _ssurgo_request_details(args, kwargs) -> dict[str, Any]:
+    """Describe one SDM request without retaining credentials or cookies."""
+    endpoint = str(args[0] if args else kwargs.get("url", ""))
+    data = kwargs.get("data") or {}
+    query = str(data.get("QUERY", "")) if isinstance(data, dict) else ""
+    geometry_match = re.search(
+        r"STGeomFromText\('(.+?)',\s*4326\)", query, flags=re.DOTALL
+    )
+    return {
+        "endpoint": endpoint,
+        "method": "POST",
+        "format": data.get("FORMAT") if isinstance(data, dict) else None,
+        "timeout_seconds": kwargs.get("timeout"),
+        "query_bytes": len(query.encode("utf-8")),
+        "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+        "geometry_wkt_epsg4326": (
+            geometry_match.group(1) if geometry_match else None
+        ),
+        "query": query,
+    }
+
+
 @contextmanager
-def _requests_post_timeout(seconds: float):
-    """Give third-party adapters a bounded POST timeout when they omit one.
+def _requests_post_timeout(
+    seconds: float, diagnostics_directory: Path | None = None
+):
+    """Bound third-party POST calls and preserve malformed SSURGO responses.
 
     Watershed Workflow's NRCS adapter calls ``requests.post()`` directly
     without a timeout. Soil tiles are downloaded concurrently, so patch the
     shared function once around the whole tile pool instead of racing a patch
-    in each worker.
+    in each worker. When a diagnostics directory is supplied, the untouched
+    provider body is saved immediately before Watershed Workflow decodes JSON.
+    Valid responses containing ``Table`` are not retained, limiting storage.
     """
     original_post = requests.post
+    diagnostics_directory = (
+        Path(diagnostics_directory) if diagnostics_directory is not None else None
+    )
+    sequence_lock = Lock()
+    sequence = 0
+
+    def reserve_stem() -> str:
+        nonlocal sequence
+        with sequence_lock:
+            sequence += 1
+            return f"ssurgo_response_{sequence:06d}"
+
+    def save_metadata(
+        stem: str,
+        details: dict[str, Any],
+        *,
+        response: requests.Response | None = None,
+        raw_path: Path | None = None,
+        elapsed_seconds: float,
+        anomaly: str,
+        error: Exception | None = None,
+    ) -> Path | None:
+        if diagnostics_directory is None:
+            return None
+        diagnostics_directory.mkdir(parents=True, exist_ok=True)
+        query = details.pop("query", "")
+        query_path = diagnostics_directory / f"{stem}_request.sql"
+        query_path.write_text(query, encoding="utf-8")
+        record: dict[str, Any] = {
+            "schema": "riftprep-ssurgo-provider-response-v1",
+            "recorded_utc": datetime.now(timezone.utc).isoformat(),
+            **details,
+            "request_query_path": str(query_path.resolve()),
+            "elapsed_seconds": elapsed_seconds,
+            "anomaly": anomaly,
+            "raw_body_saved_before_json_decode": raw_path is not None,
+            "raw_body_path": str(raw_path.resolve()) if raw_path else None,
+        }
+        if response is not None:
+            raw = response.content
+            record.update(
+                {
+                    "http_status": response.status_code,
+                    "reason": response.reason,
+                    "response_url": response.url,
+                    "content_type": response.headers.get("Content-Type", ""),
+                    "response_bytes": len(raw),
+                    "response_sha256": hashlib.sha256(raw).hexdigest(),
+                    "body_preview_utf8": raw[:1000].decode(
+                        "utf-8", errors="replace"
+                    ),
+                    "response_headers": {
+                        key.lower(): value
+                        for key, value in response.headers.items()
+                        if key.lower()
+                        in {
+                            "content-type", "content-length", "date", "server",
+                            "retry-after", "x-powered-by", "x-aspnet-version",
+                            "x-aspnetmvc-version",
+                        }
+                    },
+                }
+            )
+        if error is not None:
+            record.update(
+                {"error_type": type(error).__name__, "error": str(error)}
+            )
+        metadata_path = diagnostics_directory / f"{stem}_metadata.json"
+        metadata_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+        return metadata_path
 
     def post_with_timeout(*args, **kwargs):
         kwargs.setdefault("timeout", seconds)
-        return original_post(*args, **kwargs)
+        details = _ssurgo_request_details(args, kwargs)
+        endpoint = details["endpoint"].lower()
+        observe = (
+            diagnostics_directory is not None
+            and "sdmdataaccess" in endpoint
+            and "/tabular/post.rest" in endpoint
+        )
+        started = time.perf_counter()
+        try:
+            response = original_post(*args, **kwargs)
+        except requests.RequestException as error:
+            if observe:
+                save_metadata(
+                    reserve_stem(), details, elapsed_seconds=time.perf_counter() - started,
+                    anomaly="transport_error", error=error,
+                )
+            raise
+        elapsed = time.perf_counter() - started
+        if not observe:
+            return response
+
+        stem = reserve_stem()
+        if not response.ok:
+            raw_path = diagnostics_directory / f"{stem}_body.bin"
+            diagnostics_directory.mkdir(parents=True, exist_ok=True)
+            raw_path.write_bytes(response.content)
+            save_metadata(
+                stem, details, response=response, raw_path=raw_path,
+                elapsed_seconds=elapsed, anomaly="http_error",
+            )
+            return response
+
+        original_json = response.json
+
+        def observed_json(*json_args, **json_kwargs):
+            diagnostics_directory.mkdir(parents=True, exist_ok=True)
+            pending_path = diagnostics_directory / f"{stem}_body.pending.bin"
+            pending_path.write_bytes(response.content)
+            try:
+                payload = original_json(*json_args, **json_kwargs)
+            except (requests.exceptions.JSONDecodeError, json.JSONDecodeError) as error:
+                raw_path = diagnostics_directory / f"{stem}_body.bin"
+                pending_path.replace(raw_path)
+                save_metadata(
+                    stem, dict(details), response=response, raw_path=raw_path,
+                    elapsed_seconds=elapsed, anomaly="invalid_json", error=error,
+                )
+                raise
+            if not isinstance(payload, dict) or "Table" not in payload:
+                raw_path = diagnostics_directory / f"{stem}_body.bin"
+                pending_path.replace(raw_path)
+                save_metadata(
+                    stem, dict(details), response=response, raw_path=raw_path,
+                    elapsed_seconds=elapsed, anomaly="missing_table",
+                )
+            else:
+                pending_path.unlink(missing_ok=True)
+            return payload
+
+        response.json = observed_json
+        return response
 
     requests.post = post_with_timeout
     try:
@@ -108,39 +269,242 @@ def resolve_boundary(spec: CaseSpec, paths: ProjectPaths, ledger: ProvenanceLedg
     raw_dir.mkdir(parents=True, exist_ok=True)
     domain = spec.domain
     path = raw_dir / "selected_domain.gpkg"
-    if spec.cache.mode == "reuse" and path.is_file():
-        boundary = gpd.read_file(path)
-        provider = {
-            "huc": "usgs_wbd",
-            "shapefile": "local_vector",
-            "rectangle": "user_rectangle",
-        }[domain.mode]
-    elif domain.mode == "huc":
-        boundary = get_huc_boundary(str(domain.huc_code), domain.huc_level)
-        provider = "usgs_wbd"
-    elif domain.mode == "shapefile":
-        boundary = load_vector(domain.vector_path, layer=domain.vector_layer)
-        provider = "local_vector"
-    else:
-        boundary = gpd.GeoDataFrame(
-            {"domain_id": [spec.case_name]},
-            geometry=[box(*domain.bounds)],
-            crs=domain.bounds_crs,
+    provider = {
+        "huc": "usgs_wbd",
+        "shapefile": "local_vector",
+        "rectangle": "user_rectangle",
+    }[domain.mode]
+    started_utc = datetime.now(timezone.utc).isoformat()
+    before = _raw_file_state(raw_dir)
+    query_parameters = {
+        "mode": domain.mode,
+        "huc_code": domain.huc_code,
+        "huc_level": domain.huc_level,
+        "vector_path": domain.vector_path,
+        "vector_layer": domain.vector_layer,
+        "bounds": domain.bounds,
+        "bounds_crs": domain.bounds_crs,
+    }
+    try:
+        if spec.cache.mode == "reuse" and path.is_file():
+            boundary = gpd.read_file(path)
+        elif domain.mode == "huc":
+            boundary = get_huc_boundary(str(domain.huc_code), domain.huc_level)
+        elif domain.mode == "shapefile":
+            boundary = load_vector(domain.vector_path, layer=domain.vector_layer)
+        else:
+            boundary = gpd.GeoDataFrame(
+                {"domain_id": [spec.case_name]},
+                geometry=[box(*domain.bounds)],
+                crs=domain.bounds_crs,
+            )
+        if not (spec.cache.mode == "reuse" and path.is_file()):
+            boundary.to_file(path, driver="GPKG")
+        reference = _artifact_spatial_reference(path)
+        ledger.register(
+            "boundary", provider, path, {"mode": domain.mode},
+            spatial_reference=reference,
         )
-        provider = "user_rectangle"
-    if not (spec.cache.mode == "reuse" and path.is_file()):
-        boundary.to_file(path, driver="GPKG")
-    ledger.register("boundary", provider, path, {"mode": domain.mode})
+    except Exception as error:
+        ledger.finalize_acquisition(
+            product="boundary", provider=provider, files={}, raw_root=paths.raw,
+            cache_mode=spec.cache.mode, status="failed",
+            started_utc=started_utc,
+            completed_utc=datetime.now(timezone.utc).isoformat(),
+            query_parameters=query_parameters, provider_metadata={},
+            partial_artifacts=_partial_artifact_facts(raw_dir, before),
+            error=error,
+        )
+        raise
+    current_boundary_state = (path.stat().st_size, path.stat().st_mtime_ns)
+    reused = before.get(str(path.resolve())) == current_boundary_state
+    ledger.finalize_acquisition(
+        product="boundary", provider=provider, files={"vector": path},
+        raw_root=paths.raw, cache_mode=spec.cache.mode,
+        status="reused" if spec.cache.mode == "reuse" and reused else "succeeded",
+        started_utc=started_utc,
+        completed_utc=datetime.now(timezone.utc).isoformat(),
+        query_parameters=query_parameters,
+        provider_metadata={
+            "feature_count": int(len(boundary)),
+            "geometry_types": sorted(set(boundary.geometry.geom_type.dropna())),
+        },
+        spatial_references={"vector": reference},
+    )
     return boundary
 
 
-def _copy_local(source: str | Path, destination: Path) -> Path:
+def _copy_local(
+    source: str | Path,
+    destination: Path,
+    *,
+    reuse_existing: bool = False,
+) -> Path:
     source = Path(source).expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if reuse_existing and destination.is_file():
+        return destination
     shutil.copy2(source, destination)
     return destination
+
+
+def _raw_file_state(directory: str | Path) -> dict[str, tuple[int, int]]:
+    directory = Path(directory)
+    if not directory.is_dir():
+        return {}
+    return {
+        str(path.resolve()): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+
+
+def _partial_artifact_facts(
+    directory: str | Path,
+    before: dict[str, tuple[int, int]],
+) -> tuple[dict[str, Any], ...]:
+    """Inventory new or changed raw files left by an unsuccessful request."""
+    facts = []
+    for path_text, state in _raw_file_state(directory).items():
+        if before.get(path_text) == state:
+            continue
+        path = Path(path_text)
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        facts.append({
+            "path": path_text,
+            "bytes": state[0],
+            "sha256": digest.hexdigest(),
+        })
+    return tuple(sorted(facts, key=lambda item: item["path"]))
+
+
+def _artifact_spatial_reference(path: str | Path) -> dict[str, Any]:
+    """Read only embedded CRS metadata; never infer a CRS from coordinates."""
+    path = Path(path)
+    suffix = path.suffix.lower()
+    try:
+        if suffix in {".tif", ".tiff", ".img", ".vrt"}:
+            with rasterio.open(path) as source:
+                crs = source.crs
+        elif suffix in {".gpkg", ".shp", ".geojson"}:
+            crs = gpd.read_file(path, rows=1).crs
+        elif suffix in {".nc", ".nc4", ".cdf"}:
+            with xr.open_dataset(path, decode_cf=False) as source:
+                value = source.attrs.get("crs") or source.attrs.get("source_crs")
+                crs = CRS.from_user_input(value) if value else None
+                if crs is None:
+                    for variable in source.data_vars.values():
+                        mapping = variable.attrs.get("grid_mapping")
+                        if mapping and mapping in source:
+                            crs = CRS.from_cf(dict(source[mapping].attrs))
+                            break
+        else:
+            return {"status": "not_applicable", "value": None}
+    except Exception as error:
+        return {
+            "status": "unavailable", "value": None,
+            "reason": f"embedded CRS could not be read: {type(error).__name__}",
+        }
+    if crs is None:
+        return {
+            "status": "unavailable", "value": None,
+            "reason": "artifact contains no embedded CRS metadata",
+        }
+    resolved = CRS.from_user_input(crs)
+    return {
+        "status": "known",
+        "value": resolved.to_string(),
+        "wkt": resolved.to_wkt(),
+    }
+
+
+def _query_parameters(
+    product: ProductSpec,
+    geometry: gpd.GeoDataFrame,
+) -> dict[str, Any]:
+    return {
+        "selected_options": product.options,
+        "spatial_context": {
+            "bounds": [float(value) for value in geometry.total_bounds],
+            "crs": str(geometry.crs) if geometry.crs is not None else None,
+        },
+    }
+
+
+def _finalize_product_acquisition(
+    *,
+    ledger: ProvenanceLedger,
+    result: RawProduct | None,
+    product_name: str,
+    product: ProductSpec,
+    geometry: gpd.GeoDataFrame,
+    paths: ProjectPaths,
+    cache_mode: str,
+    started_utc: str,
+    before: dict[str, tuple[int, int]],
+    error: BaseException | None = None,
+) -> None:
+    completed_utc = datetime.now(timezone.utc).isoformat()
+    files = result.files if result is not None else {}
+    raw_root = paths.raw
+    raw_files = {
+        key: path for key, path in files.items()
+        if Path(path).resolve().is_relative_to(raw_root.resolve())
+    }
+    reused = bool(raw_files) and all(
+        before.get(str(Path(path).resolve()))
+        == (Path(path).stat().st_size, Path(path).stat().st_mtime_ns)
+        for path in raw_files.values()
+    )
+    status = "failed" if error is not None else (
+        "reused" if cache_mode == "reuse" and reused else "succeeded"
+    )
+    ledger.finalize_acquisition(
+        product=product_name,
+        provider=product.provider,
+        files=files,
+        raw_root=raw_root,
+        cache_mode=cache_mode,
+        status=status,
+        started_utc=started_utc,
+        completed_utc=completed_utc,
+        query_parameters=_query_parameters(product, geometry),
+        provider_metadata=result.metadata if result is not None else {},
+        spatial_references={
+            key: _artifact_spatial_reference(path) for key, path in raw_files.items()
+        },
+        partial_artifacts=(
+            _partial_artifact_facts(raw_root / product_name, before)
+            if error is not None else ()
+        ),
+        error=error,
+    )
+
+
+def _register_raw_files(
+    ledger: ProvenanceLedger,
+    product: str,
+    provider: str,
+    files: dict[str, Path],
+    raw_root: Path,
+    options: dict[str, Any],
+    source_url: str | None = None,
+    source_urls: dict[str, str] | None = None,
+) -> None:
+    """Register only acquisition artifacts owned by ``raw/``."""
+    raw_root = raw_root.resolve()
+    for key, artifact in files.items():
+        path = Path(artifact).resolve()
+        if path.is_relative_to(raw_root):
+            ledger.register(
+                product, provider, path, {**options, "artifact": key},
+                source_url=(source_urls or {}).get(key, source_url),
+            )
 
 
 def _xy_names(data: xr.DataArray) -> tuple[str, str]:
@@ -227,6 +591,36 @@ def _save_dataset(dataset: xr.Dataset, path: Path) -> Path:
     return path
 
 
+def _write_dem_mosaic(
+    tile_rasters: list[Path], destination: Path, resolution: float
+) -> Path:
+    """Mosaic converted source-grid tiles into a clearly derived raster."""
+    sources = [rasterio.open(path) for path in tile_rasters]
+    try:
+        mosaic, transform = merge_rasters(
+            sources,
+            res=(float(resolution), float(resolution)),
+            nodata=-9999.0,
+            target_aligned_pixels=True,
+            resampling=Resampling.bilinear,
+        )
+        profile = sources[0].profile.copy()
+    finally:
+        for source in sources:
+            source.close()
+    values = mosaic[0].astype(np.float32, copy=False)
+    profile.update(
+        driver="GTiff", height=values.shape[0], width=values.shape[1],
+        count=1, dtype="float32", transform=transform,
+        nodata=-9999.0, compress="deflate",
+        tiled=values.shape[0] >= 16 and values.shape[1] >= 16,
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(destination, "w", **profile) as output:
+        output.write(values, 1)
+    return destination
+
+
 def _plot_native_raster(path: Path, destination: Path, title: str, label: str, dpi: int) -> Path:
     with rasterio.open(path) as source:
         factor = max(1, int(max(source.height, source.width) / 2500))
@@ -261,19 +655,31 @@ def fetch_dem(
     raw_dir = paths.raw / "dem"
     raw_dir.mkdir(parents=True, exist_ok=True)
     files: dict[str, Path] = {}
+    source_url: str | None = None
     if product.provider == "watershed_workflow_3dep":
+        source_url = "https://elevation.nationalmap.gov/arcgis/services/3DEPElevation/ImageServer/WMSServer"
         resolution = int(product.options.get("resolution_m", 30))
         tile_degrees = float(product.options.get("tile_degrees", 1.0))
         max_attempts = max(1, int(product.options.get("max_attempts", 5)))
         if tile_degrees <= 0:
             raise ValueError("dem.options.tile_degrees must be positive.")
-        nc_path = raw_dir / f"3dep_{resolution}m_native.nc"
-        raster_path = raw_dir / f"3dep_{resolution}m_native.tif"
-        if reuse_existing and nc_path.is_file() and raster_path.is_file():
-            files.update(netcdf=nc_path, raster=raster_path)
-            with xr.open_dataset(nc_path) as dataset:
+        legacy_nc = raw_dir / f"3dep_{resolution}m_native.nc"
+        legacy_raster = raw_dir / f"3dep_{resolution}m_native.tif"
+        using_legacy_cache = (
+            paths.uses_legacy_input_directory
+            and reuse_existing
+            and legacy_nc.is_file()
+            and legacy_raster.is_file()
+        )
+        provider_responses: list[dict[str, Any]] = []
+        if using_legacy_cache:
+            # Preserve validated legacy cases exactly as they are.  These names predate
+            # the directory contract and are never created for a new acquisition.
+            files.update(netcdf=legacy_nc, raster=legacy_raster)
+            with xr.open_dataset(legacy_nc) as dataset:
                 variable = next(iter(dataset.data_vars))
             tile_count = int(product.options.get("cached_tile_count", 1))
+            acquisition_layout = "legacy_cache_unchanged"
         else:
             Manager3DEP, _, _, _, set_data_directory = _ww_sources()
             set_data_directory(str(paths.provider_cache / "dem"))
@@ -296,19 +702,40 @@ def fetch_dem(
 
             query = boundary.to_crs("EPSG:4326")
             xmin, ymin, xmax, ymax = query.total_bounds
+            processed_dir = paths.processed / "dem" / "watershed_workflow_3dep"
+            processed_dir.mkdir(parents=True, exist_ok=True)
             if max(xmax - xmin, ymax - ymin) <= tile_degrees:
-                dataset = get_dataset(query)
+                response_path = raw_dir / f"3dep_{resolution}m_provider_response.nc"
+                raster_path = processed_dir / f"3dep_{resolution}m_source_grid.tif"
+                if reuse_existing and response_path.is_file():
+                    with xr.open_dataset(response_path) as cached:
+                        dataset = cached.load()
+                else:
+                    dataset = get_dataset(query)
+                    _save_dataset(dataset, response_path)
                 variable = next(iter(dataset.data_vars))
-                files["netcdf"] = _save_dataset(dataset, nc_path)
-                files["raster"] = dataset_variable_to_geotiff(
-                    dataset, variable, raster_path, "EPSG:5070"
-                )
+                provider_responses.append({
+                    "artifact_key": "provider_response",
+                    "path": str(response_path.resolve()),
+                    "query_bounds_epsg4326": [
+                        float(value) for value in query.total_bounds
+                    ],
+                    "dimensions": {name: int(size) for name, size in dataset.sizes.items()},
+                })
+                if not (reuse_existing and raster_path.is_file()):
+                    dataset_variable_to_geotiff(
+                        dataset, variable, raster_path, "EPSG:5070"
+                    )
                 dataset.close()
+                files.update(provider_response=response_path, raster=raster_path)
                 tile_count = 1
+                acquisition_layout = "single_provider_response"
             else:
                 domain = query.geometry.union_all()
-                tile_dir = raw_dir / "tiles"
-                tile_dir.mkdir(parents=True, exist_ok=True)
+                raw_tile_dir = raw_dir / "provider_responses"
+                processed_tile_dir = processed_dir / "source_tiles"
+                raw_tile_dir.mkdir(parents=True, exist_ok=True)
+                processed_tile_dir.mkdir(parents=True, exist_ok=True)
                 tile_rasters: list[Path] = []
                 tile_count = 0
                 for x0 in np.arange(xmin, xmax, tile_degrees):
@@ -326,81 +753,98 @@ def fetch_dem(
                         tile = gpd.GeoDataFrame(
                             {"tile": [tile_count]}, geometry=[clipped], crs="EPSG:4326"
                         )
-                        dataset = get_dataset(tile)
+                        response_path = (
+                            raw_tile_dir
+                            / f"3dep_{resolution}m_provider_response_{tile_count:04d}.nc"
+                        )
+                        tile_raster = (
+                            processed_tile_dir
+                            / f"3dep_{resolution}m_source_grid_{tile_count:04d}.tif"
+                        )
+                        if reuse_existing and response_path.is_file():
+                            with xr.open_dataset(response_path) as cached:
+                                dataset = cached.load()
+                        else:
+                            dataset = get_dataset(tile)
+                            _save_dataset(dataset, response_path)
                         variable = next(iter(dataset.data_vars))
-                        tile_nc = tile_dir / f"3dep_{resolution}m_tile_{tile_count:04d}.nc"
-                        tile_tif = tile_dir / f"3dep_{resolution}m_tile_{tile_count:04d}.tif"
-                        files[f"tile_netcdf_{tile_count:04d}"] = _save_dataset(
-                            dataset, tile_nc
-                        )
-                        files[f"tile_raster_{tile_count:04d}"] = dataset_variable_to_geotiff(
-                            dataset, variable, tile_tif, "EPSG:5070"
-                        )
-                        tile_rasters.append(tile_tif)
+                        provider_responses.append({
+                            "artifact_key": f"provider_response_{tile_count:04d}",
+                            "path": str(response_path.resolve()),
+                            "query_bounds_epsg4326": [
+                                float(value) for value in tile.total_bounds
+                            ],
+                            "dimensions": {
+                                name: int(size) for name, size in dataset.sizes.items()
+                            },
+                        })
+                        if not (reuse_existing and tile_raster.is_file()):
+                            dataset_variable_to_geotiff(
+                                dataset, variable, tile_raster, "EPSG:5070"
+                            )
                         dataset.close()
+                        files[f"provider_response_{tile_count:04d}"] = response_path
+                        tile_rasters.append(tile_raster)
                 if not tile_rasters:
                     raise LookupError("3DEP returned no DEM tiles for the selected domain.")
-                sources = [rasterio.open(path) for path in tile_rasters]
-                try:
-                    mosaic, transform = merge_rasters(
-                        sources,
-                        res=(float(resolution), float(resolution)),
-                        nodata=-9999.0,
-                        target_aligned_pixels=True,
-                        resampling=Resampling.bilinear,
-                    )
-                    profile = sources[0].profile.copy()
-                finally:
-                    for source in sources:
-                        source.close()
-                values = mosaic[0].astype(np.float32, copy=False)
-                profile.update(
-                    driver="GTiff", height=values.shape[0], width=values.shape[1],
-                    count=1, dtype="float32", transform=transform,
-                    nodata=-9999.0, compress="deflate",
-                    tiled=values.shape[0] >= 16 and values.shape[1] >= 16,
-                )
-                with rasterio.open(raster_path, "w", **profile) as output:
-                    output.write(values, 1)
-                x = transform.c + (np.arange(values.shape[1]) + 0.5) * transform.a
-                y = transform.f + (np.arange(values.shape[0]) + 0.5) * transform.e
-                mosaic_dataset = xr.Dataset(
-                    {"dem": (("y", "x"), values)}, coords={"x": x, "y": y},
-                    attrs={
-                        "product": f"3DEP {resolution}m DEM",
-                        "source": "py3dep TNM tiled native-product mosaic",
-                    },
-                )
-                files["netcdf"] = _save_dataset(mosaic_dataset, nc_path)
+                raster_path = processed_dir / f"3dep_{resolution}m_source_mosaic.tif"
+                if not (reuse_existing and raster_path.is_file()):
+                    _write_dem_mosaic(tile_rasters, raster_path, resolution)
                 files["raster"] = raster_path
-                mosaic_dataset.close()
-                del mosaic, values
+                acquisition_layout = "tiled_provider_responses"
         metadata = {
             "resolution_m": resolution, "variable": variable,
             "tile_degrees": tile_degrees, "tile_count": tile_count,
             "max_attempts": max_attempts,
+            "product": f"USGS 3DEP {resolution} m DEM",
+            "acquisition_layout": acquisition_layout,
+            "raw_artifact_semantics": (
+                "Immutable NetCDF snapshot of the dataset returned by the "
+                "Watershed Workflow Manager3DEP/py3dep request"
+            ),
+            "provider_processing_disclosure": (
+                "The upstream USGS 3DEP WMS/py3dep request returns the selected "
+                "10 m or 30 m source grid in EPSG:5070 and py3dep masks it to the "
+                "request geometry before riftprep receives it. riftprep performs no "
+                "RIFT-grid alignment before saving the raw response snapshot."
+            ),
+            "derived_raster": str(Path(files["raster"]).resolve()),
+            "raw_product_modified": False,
+            "provider_responses": provider_responses,
         }
     elif product.provider == "copernicus_glo30":
+        source_url = "https://copernicus-dem-30m.s3.amazonaws.com/"
         files, metadata = download_copernicus_glo30(
             boundary,
             raw_dir,
+            processed_dir=paths.processed / "dem" / "copernicus_glo30",
             reuse_existing=reuse_existing,
             max_attempts=int(product.options.get("max_attempts", 5)),
         )
     elif product.provider == "local":
         source = product.options["path"]
-        files["raster"] = _copy_local(source, raw_dir / Path(source).name)
-        metadata = {"source_path": str(Path(source).expanduser().resolve())}
+        files["raster"] = _copy_local(
+            source, raw_dir / Path(source).name,
+            reuse_existing=reuse_existing,
+        )
+        metadata = {
+            "source_path": str(Path(source).expanduser().resolve()),
+            "raw_artifact_semantics": "Byte-preserved copy of the user-selected DEM",
+            "raw_product_modified": False,
+        }
     else:
         raise ValueError(f"Unsupported DEM provider: {product.provider}")
-    for path in files.values():
-        ledger.register("dem", product.provider, path, product.options)
+    _register_raw_files(
+        ledger, "dem", product.provider, files, paths.raw, product.options,
+        source_url=source_url,
+        source_urls=metadata.get("source_urls"),
+    )
     if plot:
         resolution_text = f" ({metadata['resolution_m']} m product)" if "resolution_m" in metadata else ""
         files["plot"] = _plot_native_raster(
             files["raster"],
             paths.figures / "raw_dem_selected_product.png",
-            f"Selected raw DEM{resolution_text}",
+            f"Selected DEM before RIFT-grid alignment{resolution_text}",
             "Elevation (m)",
             dpi,
         )
@@ -607,7 +1051,10 @@ def fetch_land_cover(
         }
     elif product.provider == "local":
         for variable, source in product.options["rasters"].items():
-            files[variable] = _copy_local(source, raw_dir / Path(source).name)
+            files[variable] = _copy_local(
+                source, raw_dir / Path(source).name,
+                reuse_existing=reuse_existing,
+            )
         metadata = {"variables": sorted(product.options["rasters"])}
     else:
         raise ValueError(f"Unsupported land-cover provider: {product.provider}")
@@ -650,6 +1097,7 @@ def fetch_soil(
             raise ValueError("soil.options.request_timeout_seconds must be positive.")
         tile_count = 1
         tiles_with_soil = 1
+        provider_response_diagnostic_count = 0
         terminal_empty_queries: list[list[float]] = []
         if reuse_existing and path.is_file():
             soil = gpd.read_file(path)
@@ -743,9 +1191,34 @@ def fetch_soil(
                         crs=tile.crs,
                     )
                 assert last_error is not None
+                if isinstance(
+                    last_error,
+                    (requests.exceptions.JSONDecodeError, json.JSONDecodeError),
+                ):
+                    diagnostic_records = sorted(
+                        (raw_dir / "provider_response_diagnostics").glob(
+                            "*_metadata.json"
+                        ),
+                        key=lambda item: item.stat().st_mtime,
+                    )
+                    latest = diagnostic_records[-1] if diagnostic_records else None
+                    raise RuntimeError(
+                        "SSURGO returned malformed JSON after all configured retries "
+                        f"for EPSG:4326 bounds {tile.total_bounds.tolist()}. "
+                        "The response was not interpreted as no-data and no fallback "
+                        "soil values were substituted. "
+                        + (
+                            f"Inspect the preserved provider response at {latest}."
+                            if latest is not None
+                            else "No provider-response diagnostic was available."
+                        )
+                    ) from last_error
                 raise last_error
 
-            with _requests_post_timeout(request_timeout_seconds):
+            provider_diagnostics = raw_dir / "provider_response_diagnostics"
+            with _requests_post_timeout(
+                request_timeout_seconds, provider_diagnostics
+            ):
                 if max(xmax - xmin, ymax - ymin) <= tile_degrees:
                     soil = download_tile(query)
                 else:
@@ -814,6 +1287,25 @@ def fetch_soil(
                     encoding="utf-8",
                 )
                 files["terminal_empty_queries"] = empty_response_path
+            diagnostic_metadata = sorted(provider_diagnostics.glob("*_metadata.json"))
+            provider_response_diagnostic_count = len(diagnostic_metadata)
+            if diagnostic_metadata:
+                diagnostic_index = raw_dir / "ssurgo_provider_response_diagnostics.json"
+                diagnostic_index.write_text(
+                    json.dumps(
+                        {
+                            "description": (
+                                "Malformed, failed, or Table-free SSURGO provider "
+                                "responses. Raw bodies were preserved before JSON parsing."
+                            ),
+                            "count": len(diagnostic_metadata),
+                            "records": [str(item.resolve()) for item in diagnostic_metadata],
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                files["provider_response_diagnostics"] = diagnostic_index
             soil.to_file(path, driver="GPKG")
         files["vector"] = path
         metadata = {
@@ -824,22 +1316,28 @@ def fetch_soil(
             "request_timeout_seconds": request_timeout_seconds,
             "max_subdivision_depth": max_subdivision_depth,
             "terminal_empty_query_count": len(terminal_empty_queries),
+            "provider_response_diagnostic_count": (
+                provider_response_diagnostic_count
+            ),
         }
     elif product.provider == "soilgrids":
         files, metadata = download_soilgrids_hydraulic(
-            boundary, product.options, raw_dir, reuse_existing=reuse_existing
+            boundary, product.options, raw_dir,
+            processed_dir=paths.processed / "soil" / "soilgrids",
+            reuse_existing=reuse_existing,
         )
     elif product.provider == "local":
         source = product.options["path"]
-        files["vector"] = _copy_local(source, raw_dir / Path(source).name)
+        files["vector"] = _copy_local(
+            source, raw_dir / Path(source).name,
+            reuse_existing=reuse_existing,
+        )
         metadata = {"source_path": str(Path(source).expanduser().resolve())}
     else:
         raise ValueError(f"Unsupported soil provider: {product.provider}")
-    for key, artifact in files.items():
-        ledger.register(
-            "soil", product.provider, artifact,
-            {**product.options, "artifact": key},
-        )
+    _register_raw_files(
+        ledger, "soil", product.provider, files, paths.raw, product.options
+    )
     if plot:
         if product.provider == "soilgrids":
             files["plot"] = _plot_native_raster(
@@ -927,24 +1425,34 @@ def fetch_rainfall(
         dataset.close()
     elif product.provider == "daymet":
         files, metadata = download_daymet_hourly(
-            boundary, product.options, raw_dir, reuse_existing=reuse_existing
+            boundary, product.options, raw_dir,
+            processed_dir=paths.processed / "rainfall" / "daymet",
+            reuse_existing=reuse_existing,
         )
     elif product.provider == "mrms":
         files, metadata = download_mrms_hourly(
-            boundary, product.options, raw_dir, reuse_existing=reuse_existing
+            boundary, product.options, raw_dir,
+            processed_dir=paths.processed / "rainfall" / "mrms",
+            reuse_existing=reuse_existing,
         )
     elif product.provider == "era5_land":
         files, metadata = download_era5_land_hourly(
-            boundary, product.options, raw_dir, reuse_existing=reuse_existing
+            boundary, product.options, raw_dir,
+            processed_dir=paths.processed / "rainfall" / "era5_land",
+            reuse_existing=reuse_existing,
         )
     elif product.provider == "local":
         source = product.options["path"]
-        files["netcdf"] = _copy_local(source, raw_dir / Path(source).name)
+        files["netcdf"] = _copy_local(
+            source, raw_dir / Path(source).name,
+            reuse_existing=reuse_existing,
+        )
         metadata = {"source_path": str(Path(source).expanduser().resolve())}
     else:
         raise ValueError(f"Unsupported rainfall provider: {product.provider}")
-    for path in files.values():
-        ledger.register("rainfall", product.provider, path, product.options)
+    _register_raw_files(
+        ledger, "rainfall", product.provider, files, paths.raw, product.options
+    )
     if plot:
         with xr.open_dataset(files["netcdf"]) as source:
             variable = str(product.options.get("precipitation_variable", "APCP_surface"))
@@ -1041,34 +1549,44 @@ def fetch_hydrography(
                     piece.to_file(tile_path, driver="GPKG")
                     files[f"tile_{index:04d}"] = tile_path
                     pieces.append(piece)
-                if not pieces:
-                    raise LookupError("USGS 3DHP returned no flowlines for any domain tile.")
-                rivers = gpd.GeoDataFrame(
-                    pd.concat(pieces, ignore_index=True), crs=pieces[0].crs
-                )
-                lookup = {str(column).lower(): column for column in rivers.columns}
-                identifier = next(
-                    (
-                        lookup[name] for name in (
-                            "permanent_identifier", "nhdplusid", "objectid", "globalid"
-                        ) if name in lookup
-                    ),
-                    None,
-                )
-                if identifier is not None:
-                    rivers = rivers.drop_duplicates(subset=[identifier], keep="first")
+                if pieces:
+                    rivers = gpd.GeoDataFrame(
+                        pd.concat(pieces, ignore_index=True), crs=pieces[0].crs
+                    )
+                    lookup = {str(column).lower(): column for column in rivers.columns}
+                    identifier = next(
+                        (
+                            lookup[name] for name in (
+                                "permanent_identifier", "nhdplusid", "objectid", "globalid"
+                            ) if name in lookup
+                        ),
+                        None,
+                    )
+                    if identifier is not None:
+                        rivers = rivers.drop_duplicates(subset=[identifier], keep="first")
+                    else:
+                        geometry_key = rivers.geometry.to_wkb(hex=True)
+                        rivers = rivers.loc[~geometry_key.duplicated()].copy()
                 else:
-                    geometry_key = rivers.geometry.to_wkb(hex=True)
-                    rivers = rivers.loc[~geometry_key.duplicated()].copy()
+                    # Every queried tile returned a provider-confirmed empty
+                    # feature set. Preserve that fact as a valid raw product.
+                    rivers = gpd.GeoDataFrame(
+                        {"geometry": gpd.GeoSeries([], crs="EPSG:4326")},
+                        geometry="geometry", crs="EPSG:4326",
+                    )
             rivers.to_file(path, driver="GPKG")
         files["vector"] = path
         metadata = {
             "features": int(len(rivers)), "tile_degrees": tile_degrees,
             "tile_count": tile_count, "download_workers": workers,
+            "empty_domain_confirmed": bool(rivers.empty),
         }
     elif product.provider == "local":
         source = product.options["path"]
-        files["vector"] = _copy_local(source, raw_dir / Path(source).name)
+        files["vector"] = _copy_local(
+            source, raw_dir / Path(source).name,
+            reuse_existing=reuse_existing,
+        )
         rivers = gpd.read_file(files["vector"])
         metadata = {"features": int(len(rivers))}
     else:
@@ -1081,7 +1599,8 @@ def fetch_hydrography(
     if plot:
         fig, ax = plt.subplots(figsize=(7.2, 5.2), constrained_layout=True)
         boundary.to_crs(rivers.crs).boundary.plot(ax=ax, color="black", linewidth=0.8)
-        rivers.plot(ax=ax, color="#0072B2", linewidth=0.5)
+        if not rivers.empty:
+            rivers.plot(ax=ax, color="#0072B2", linewidth=0.5)
         ax.set(title="Selected raw hydrography product", aspect="equal")
         plot_path = paths.figures / "raw_hydrography_selected_product.png"
         fig.savefig(plot_path, dpi=dpi, bbox_inches="tight")
@@ -1104,7 +1623,10 @@ def fetch_drainage(
     files: dict[str, Path] = {}
     if product.provider == "local_vector":
         source = product.options["path"]
-        files["vector"] = _copy_local(source, raw_dir / Path(source).name)
+        files["vector"] = _copy_local(
+            source, raw_dir / Path(source).name,
+            reuse_existing=reuse_existing,
+        )
         data = gpd.read_file(files["vector"])
         ledger.register("drainage", product.provider, files["vector"], product.options)
         if plot:
@@ -1119,7 +1641,10 @@ def fetch_drainage(
         return RawProduct("drainage", product.provider, files, {"features": int(len(data))})
     if product.provider == "local_raster":
         source = product.options["path"]
-        files["raster"] = _copy_local(source, raw_dir / Path(source).name)
+        files["raster"] = _copy_local(
+            source, raw_dir / Path(source).name,
+            reuse_existing=reuse_existing,
+        )
         ledger.register("drainage", product.provider, files["raster"], product.options)
         if plot:
             files["plot"] = _plot_native_raster(
@@ -1150,7 +1675,10 @@ def fetch_initial_state(
     files: dict[str, Path] = {}
     if product.provider == "local":
         source = Path(product.options["path"])
-        files["raster"] = _copy_local(source, raw_dir / source.name)
+        files["raster"] = _copy_local(
+            source, raw_dir / source.name,
+            reuse_existing=reuse_existing,
+        )
     elif product.provider in {"dry_zero", "constant"}:
         depth_m = 0.0 if product.provider == "dry_zero" else float(
             product.options.get("depth_m", 0.0)
@@ -1536,30 +2064,67 @@ def acquire_raw_product(
                 )
                 else query
             )
-            return fetchers[name](
-                product, source_geometry, paths, ledger,
-                spec.plots.raw_products, spec.plots.dpi,
-                spec.cache.mode == "reuse",
+            started_utc = datetime.now(timezone.utc).isoformat()
+            before = _raw_file_state(paths.raw / name)
+            try:
+                result = fetchers[name](
+                    product, source_geometry, paths, ledger,
+                    spec.plots.raw_products, spec.plots.dpi,
+                    spec.cache.mode == "reuse",
+                )
+            except Exception as error:
+                _finalize_product_acquisition(
+                    ledger=ledger, result=None, product_name=name,
+                    product=product, geometry=source_geometry, paths=paths,
+                    cache_mode=spec.cache.mode, started_utc=started_utc,
+                    before=before, error=error,
+                )
+                raise
+            _finalize_product_acquisition(
+                ledger=ledger, result=result, product_name=name,
+                product=product, geometry=source_geometry, paths=paths,
+                cache_mode=spec.cache.mode, started_utc=started_utc,
+                before=before,
             )
+            return result
     if name in {"inflows", "coastal"}:
         product = getattr(spec, name)
         if not product.enabled:
             raise ValueError(f"Raw product {name!r} is disabled in the case configuration.")
         with timing_stage(f"download_raw_{name}"):
-            if product.provider == "usgs_waterdata":
-                return fetch_usgs_waterdata(
-                    name, product, paths, ledger, spec.plots.raw_products,
-                    spec.plots.dpi, spec.cache.mode == "reuse",
+            started_utc = datetime.now(timezone.utc).isoformat()
+            before = _raw_file_state(paths.raw / name)
+            try:
+                if product.provider == "usgs_waterdata":
+                    result = fetch_usgs_waterdata(
+                        name, product, paths, ledger, spec.plots.raw_products,
+                        spec.plots.dpi, spec.cache.mode == "reuse",
+                    )
+                elif product.provider in {"usgs_nwis", "usgs_nwis_legacy"}:
+                    result = fetch_nwis_legacy(
+                        name, product, paths, ledger, spec.plots.raw_products,
+                        spec.plots.dpi, spec.cache.mode == "reuse",
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported {name} provider: {product.provider}. "
+                        "Use usgs_waterdata or usgs_nwis_legacy."
+                    )
+            except Exception as error:
+                _finalize_product_acquisition(
+                    ledger=ledger, result=None, product_name=name,
+                    product=product, geometry=boundary, paths=paths,
+                    cache_mode=spec.cache.mode, started_utc=started_utc,
+                    before=before, error=error,
                 )
-            if product.provider in {"usgs_nwis", "usgs_nwis_legacy"}:
-                return fetch_nwis_legacy(
-                    name, product, paths, ledger, spec.plots.raw_products,
-                    spec.plots.dpi, spec.cache.mode == "reuse",
-                )
-            raise ValueError(
-                f"Unsupported {name} provider: {product.provider}. "
-                "Use usgs_waterdata or usgs_nwis_legacy."
+                raise
+            _finalize_product_acquisition(
+                ledger=ledger, result=result, product_name=name,
+                product=product, geometry=boundary, paths=paths,
+                cache_mode=spec.cache.mode, started_utc=started_utc,
+                before=before,
             )
+            return result
     raise KeyError(f"Unknown raw product: {name!r}")
 
 

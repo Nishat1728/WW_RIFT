@@ -8,11 +8,28 @@ module, keeping configuration rules testable and out of the public front end.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from .spec import CaseSpec, case_from_mapping, load_case, save_case
+from .spec import CaseSpec, case_from_mapping, load_case, rainfall_period_seconds, save_case
+
+
+def simulation_duration_seconds(values: Mapping[str, Any]) -> float:
+    """Match rainfall when enabled; otherwise use the explicit dry-run duration."""
+    if bool(values.get("rain_enabled", True)):
+        return rainfall_period_seconds({
+            "start_utc": values.get("rain_start", "2023-06-10T00:00:00Z"),
+            "end_utc": values.get("rain_end", "2023-06-11T00:00:00Z"),
+        })
+    try:
+        hours = float(values.get("simulation_duration_hours", 24))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Simulation duration without rainfall must be numeric hours.") from exc
+    if not math.isfinite(hours) or hours <= 0:
+        raise ValueError("Simulation duration without rainfall must be positive finite hours.")
+    return hours * 3600
 
 
 def snapshot_widget_values(namespace: Mapping[str, Any]) -> dict[str, Any]:
@@ -60,9 +77,53 @@ def _json_value(
     return parsed
 
 
+def _validate_outlet_coordinates(rows: list[Any]) -> list[dict[str, Any]]:
+    """Validate the user-facing outlet JSON before it reaches GeoPandas."""
+    validated: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise ValueError(f"Outlet coordinates row {index + 1} must be a JSON object.")
+        item = dict(row)
+        for key in ("x", "y"):
+            if key not in item:
+                raise ValueError(f"Outlet coordinates row {index + 1} requires '{key}'.")
+            try:
+                value = float(item[key])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Outlet coordinates row {index + 1} field '{key}' must be numeric."
+                ) from exc
+            if not math.isfinite(value):
+                raise ValueError(f"Outlet coordinates row {index + 1} field '{key}' must be finite.")
+            item[key] = value
+        if "width_m" in item:
+            try:
+                width = float(item["width_m"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Outlet row {index + 1} width_m must be numeric.") from exc
+            if not math.isfinite(width) or width <= 0:
+                raise ValueError(f"Outlet row {index + 1} width_m must be greater than zero.")
+            item["width_m"] = width
+        if "cut_elevation_m" in item:
+            try:
+                elevation = float(item["cut_elevation_m"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Outlet row {index + 1} cut_elevation_m must be numeric."
+                ) from exc
+            if not math.isfinite(elevation):
+                raise ValueError(
+                    f"Outlet row {index + 1} cut_elevation_m must be finite."
+                )
+            item["cut_elevation_m"] = elevation
+        validated.append(item)
+    return validated
+
+
 def case_payload_from_widget_values(values: Mapping[str, Any]) -> dict[str, Any]:
     """Build the complete provider-neutral configuration from plain widget values."""
 
+    duration_seconds = simulation_duration_seconds(values)
     domain_mode = _value(values, "domain_mode", "huc")
     if domain_mode == "huc":
         domain = {
@@ -399,11 +460,17 @@ def case_payload_from_widget_values(values: Mapping[str, Any]) -> dict[str, Any]
             if outlet_source == "coordinates"
             else []
         )
+        if outlet_source == "coordinates":
+            outlet_coordinates = _validate_outlet_coordinates(outlet_coordinates)
         if outlet_source == "coordinates" and not outlet_coordinates:
             raise ValueError("Coordinate outlet mode requires at least one coordinate row.")
         outlet_crs = _optional_text(values, "outlet_crs")
         if outlet_source == "coordinates" and outlet_crs is None:
             raise ValueError("Coordinate outlet mode requires an outlet CRS.")
+        if outlet_source == "vector":
+            outlet_source = _required_text(
+                values, "outlet_vector_path", "Outlet vector path"
+            )
         if outlet_source == "auto_hydrography_lowest" and not hydro_enabled:
             raise ValueError("Automatic hydrography outlet selection requires hydrography.")
         outlets = {
@@ -440,8 +507,8 @@ def case_payload_from_widget_values(values: Mapping[str, Any]) -> dict[str, Any]
         },
         "simulation": {
             "start_time_s": 0,
-            "end_time_s": 86400,
-            "output_interval_s": 3600,
+            "end_time_s": duration_seconds,
+            "output_interval_s": min(3600, duration_seconds),
         },
     }
 

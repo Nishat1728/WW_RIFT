@@ -44,4 +44,4 @@ jobs:
         run: python tools/build_general_notebook.py
 
       - name: Confirm notebook is reproducible
-        run: git diff --exit-code -- RIFT_Input_Builder.ipynb
+        run: git diff --exit-code -- RIFT_Input_Builder.ipynb examples/HUC12_Demo.ipynb

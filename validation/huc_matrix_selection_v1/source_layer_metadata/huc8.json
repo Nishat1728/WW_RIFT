@@ -1,0 +1,81 @@
+{
+  "level": 8,
+  "layer_id": 4,
+  "layer_url": "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/FeatureServer/4",
+  "layer_name": "8-digit HU  (Subbasin)",
+  "service_current_version": 11.3,
+  "service_last_edit_date_epoch_ms": null,
+  "object_id_field": "objectid",
+  "max_record_count": 2000,
+  "supports_pagination": true,
+  "supports_order_by": true,
+  "count_before": 2456,
+  "count_after": 2456,
+  "ids_before": 2456,
+  "ids_after": 2456,
+  "unique_paged_object_ids": 2456,
+  "page_count": 2,
+  "page_lengths": [
+    2000,
+    456
+  ],
+  "pagination_complete_and_stable": true,
+  "schema_fields": [
+    "objectid",
+    "tnmid",
+    "metasourceid",
+    "sourcedatadesc",
+    "sourceoriginator",
+    "sourcefeatureid",
+    "loaddate",
+    "referencegnis_ids",
+    "areaacres",
+    "areasqkm",
+    "states",
+    "huc8",
+    "name",
+    "globalid",
+    "Shape__Length",
+    "Shape__Area"
+  ],
+  "requested_fields": [
+    "tnmid",
+    "loaddate",
+    "areasqkm",
+    "states",
+    "name",
+    "hutype",
+    "tohuc"
+  ],
+  "queried_fields": [
+    "objectid",
+    "huc8",
+    "tnmid",
+    "loaddate",
+    "areasqkm",
+    "states",
+    "name"
+  ],
+  "unavailable_optional_fields": [
+    "hutype",
+    "tohuc"
+  ],
+  "hu_type_rule_applicable": false,
+  "query": {
+    "where": "1=1",
+    "outFields": [
+      "objectid",
+      "huc8",
+      "tnmid",
+      "loaddate",
+      "areasqkm",
+      "states",
+      "name"
+    ],
+    "returnGeometry": false,
+    "orderByFields": "huc8 ASC,objectid ASC",
+    "page_size": 2000
+  },
+  "attribute_rows_canonical_sha256": "2390a8851704ab491d9c1c068328f85d07d9e5b4148eb5515fec767eb6e17968",
+  "metadata_sha256": "ac04121a6c3fa24578b67c997073b2d3b6ed220c4c31eb976e25e312714c8736"
+}

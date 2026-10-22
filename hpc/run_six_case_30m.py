@@ -22,6 +22,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from riftprep.config import resolve_simulation_ready_directory
 from riftprep.providers import get_huc_boundary
 from riftprep.workflow import run_case
 
@@ -269,20 +270,45 @@ def _validate_completed_case(case_root: Path) -> dict:
             raise AssertionError(
                 f"Land-cover percentage {stage} correction map is missing: {map_path}"
             )
-    canonical_name = f"3dep_{NATIVE_DEM_PRODUCT_M}m_native.tif"
-    raw_dem_records = [
+    legacy_name = f"3dep_{NATIVE_DEM_PRODUCT_M}m_native.tif"
+    legacy_dem_records = [
         item for item in raw_catalog
-        if item["product"] == "dem" and Path(item["path"]).name == canonical_name
+        if item["product"] == "dem" and Path(item["path"]).name == legacy_name
     ]
-    if len(raw_dem_records) != 1:
-        raise AssertionError(
-            f"Expected one canonical raw DEM named {canonical_name}, "
-            f"got {len(raw_dem_records)}"
+    provider_response_records = [
+        item for item in raw_catalog
+        if item["product"] == "dem"
+        and Path(item["path"]).name.startswith(
+            f"3dep_{NATIVE_DEM_PRODUCT_M}m_provider_response"
         )
-    raw_dem_path = Path(raw_dem_records[0]["path"])
+        and Path(item["path"]).suffix == ".nc"
+    ]
+    if provider_response_records:
+        lineage_path = case_root / "quality_control" / "dem_lineage.json"
+        lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
+        raw_dem_path = Path(lineage["source_raster_used_for_alignment"])
+        if not raw_dem_path.is_relative_to((case_root / "processed").resolve()):
+            raise AssertionError(
+                f"New DEM source raster is not processed data: {raw_dem_path}"
+            )
+        if any("native" in Path(item["path"]).name for item in provider_response_records):
+            raise AssertionError("A derived or provider-response DEM was mislabeled native")
+    elif len(legacy_dem_records) == 1:
+        # Existing validated cases retain their pre-contract cache names unchanged.
+        raw_dem_path = Path(legacy_dem_records[0]["path"])
+    else:
+        raise AssertionError(
+            "Expected preserved 3DEP provider response(s) for a new case or one "
+            f"unchanged legacy DEM named {legacy_name}; got "
+            f"{len(provider_response_records)} new and {len(legacy_dem_records)} legacy"
+        )
     with rasterio.open(raw_dem_path) as source:
         raw_dem = {
             "path": str(raw_dem_path),
+            "provider_response_paths": [
+                item["path"] for item in provider_response_records
+            ],
+            "legacy_cache": not bool(provider_response_records),
             "rows": source.height,
             "columns": source.width,
             "x_spacing": abs(float(source.transform.a)),
@@ -290,7 +316,8 @@ def _validate_completed_case(case_root: Path) -> dict:
             "crs": str(source.crs),
         }
     dem_header = {}
-    with (case_root / "rift_inputs" / "dem.asc").open("r", encoding="utf-8") as stream:
+    simulation_ready = resolve_simulation_ready_directory(case_root)
+    with (simulation_ready / "dem.asc").open("r", encoding="utf-8") as stream:
         for _ in range(6):
             key, value = stream.readline().split(maxsplit=1)
             dem_header[key.lower()] = value.strip()

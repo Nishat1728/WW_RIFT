@@ -38,17 +38,36 @@ def _geotiff_bytes(values, transform=None, crs="EPSG:4326", dtype="float32"):
 
 def test_copernicus_glo30_preserves_tile_and_builds_mosaic(monkeypatch, tmp_path):
     raw_bytes = _geotiff_bytes(np.arange(16, dtype=np.float32).reshape(4, 4))
+    calls = []
 
     def fake_download(url, destination, **kwargs):
+        calls.append(url)
         Path(destination).write_bytes(raw_bytes)
         return Path(destination)
 
     monkeypatch.setattr(adapters, "_download", fake_download)
-    files, metadata = adapters.download_copernicus_glo30(_boundary(), tmp_path)
+    raw_dir = tmp_path / "raw"
+    processed_dir = tmp_path / "processed"
+    files, metadata = adapters.download_copernicus_glo30(
+        _boundary(), raw_dir, processed_dir=processed_dir
+    )
     assert files["source_tile_0001"].read_bytes() == raw_bytes
+    assert files["source_tile_0001"].is_relative_to(raw_dir)
+    assert files["raster"].is_relative_to(processed_dir)
     assert files["raster"].is_file()
+    assert files["raster"].name == "copernicus_glo30_source_mosaic.tif"
+    assert "native" not in files["raster"].name
     assert metadata["source_tile_count"] == 1
     assert metadata["raw_source_tiles_modified"] is False
+    assert metadata["mosaic_is_derived"] is True
+
+    raw_mtime = files["source_tile_0001"].stat().st_mtime_ns
+    cached_files, _ = adapters.download_copernicus_glo30(
+        _boundary(), raw_dir, processed_dir=processed_dir, reuse_existing=True
+    )
+    assert len(calls) == 1
+    assert cached_files["source_tile_0001"].read_bytes() == raw_bytes
+    assert cached_files["source_tile_0001"].stat().st_mtime_ns == raw_mtime
 
 
 def test_daymet_daily_total_is_explicitly_distributed_hourly(monkeypatch, tmp_path):
@@ -67,6 +86,8 @@ def test_daymet_daily_total_is_explicitly_distributed_hourly(monkeypatch, tmp_pa
         return "EPSG:5070"
 
     monkeypatch.setattr(adapters, "_download_daymet_opendap_subset", fake_subset)
+    raw_dir = tmp_path / "raw"
+    processed_dir = tmp_path / "processed"
     files, metadata = adapters.download_daymet_hourly(
         _boundary(),
         {
@@ -74,7 +95,8 @@ def test_daymet_daily_total_is_explicitly_distributed_hourly(monkeypatch, tmp_pa
             "end_utc": "2020-01-02T00:00:00Z",
             "daily_distribution": "uniform_24h",
         },
-        tmp_path,
+        raw_dir,
+        processed_dir=processed_dir,
     )
     with xr.open_dataset(files["netcdf"]) as result:
         assert result.sizes["time"] == 24
@@ -83,6 +105,8 @@ def test_daymet_daily_total_is_explicitly_distributed_hourly(monkeypatch, tmp_pa
     assert metadata["native_time_step"] == "daily"
     assert metadata["region"] == "na"
     assert files["provider_netcdf_2020"].is_file()
+    assert files["provider_netcdf_2020"].is_relative_to(raw_dir)
+    assert files["netcdf"].is_relative_to(processed_dir)
     with xr.open_dataset(files["provider_netcdf_2020"]) as raw:
         np.testing.assert_allclose(raw["prcp"], 24.0)
 
@@ -103,6 +127,8 @@ def test_mrms_archive_is_retained_and_standardized(monkeypatch, tmp_path):
         return Path(destination)
 
     monkeypatch.setattr(adapters, "_download", fake_download)
+    raw_dir = tmp_path / "raw"
+    processed_dir = tmp_path / "processed"
     files, metadata = adapters.download_mrms_hourly(
         _boundary(),
         {
@@ -111,12 +137,15 @@ def test_mrms_archive_is_retained_and_standardized(monkeypatch, tmp_path):
             "product": "MultiSensor_QPE_01H_Pass2_00.00",
             "region": "CONUS",
         },
-        tmp_path,
+        raw_dir,
+        processed_dir=processed_dir,
     )
     with xr.open_dataset(files["netcdf"]) as result:
         assert result.sizes["time"] == 2
         np.testing.assert_allclose(result["APCP_surface"].mean(("x", "y")), [1.0, 2.0])
-    assert len(list((tmp_path / "provider_grib2_gz").glob("*.gz"))) == 2
+    assert len(list((raw_dir / "provider_grib2_gz").glob("*.gz"))) == 2
+    assert files["netcdf"].is_relative_to(processed_dir)
+    assert len(list((processed_dir / "decoded_grib2").glob("*.grib2"))) == 2
     assert metadata["time_records"] == 2
 
 
@@ -150,17 +179,22 @@ def test_era5_land_splits_months_and_deaccumulates(monkeypatch, tmp_path):
             return FakeResult(request)
 
     monkeypatch.setitem(sys.modules, "cdsapi", SimpleNamespace(Client=FakeClient))
+    raw_dir = tmp_path / "raw"
+    processed_dir = tmp_path / "processed"
     files, metadata = adapters.download_era5_land_hourly(
         _boundary(),
         {
             "start_utc": "2020-01-01T00:00:00Z",
             "end_utc": "2020-01-01T03:00:00Z",
         },
-        tmp_path,
+        raw_dir,
+        processed_dir=processed_dir,
     )
     assert len(requests) == 2  # Previous day and event day cross a month boundary.
     assert "provider_netcdf_201912" in files
     assert "provider_netcdf_202001" in files
+    assert files["provider_netcdf_201912"].is_relative_to(raw_dir)
+    assert files["netcdf"].is_relative_to(processed_dir)
     with xr.open_dataset(files["netcdf"]) as result:
         np.testing.assert_allclose(result["APCP_surface"], 1.0, rtol=1e-5)
     assert metadata["deaccumulated"] is True
@@ -177,12 +211,17 @@ def test_soilgrids_retains_properties_and_derives_hydraulic_rasters(monkeypatch,
         return Path(destination)
 
     monkeypatch.setattr(adapters, "_download", fake_download)
+    raw_dir = tmp_path / "raw"
+    processed_dir = tmp_path / "processed"
     files, metadata = adapters.download_soilgrids_hydraulic(
-        _boundary(), {"depth": "0-5cm", "quantile": "Q0.5"}, tmp_path
+        _boundary(), {"depth": "0-5cm", "quantile": "Q0.5"}, raw_dir,
+        processed_dir=processed_dir,
     )
     for key in ("provider_sand", "provider_clay", "provider_bdod", "provider_wv1500"):
         assert files[key].is_file()
+        assert files[key].is_relative_to(raw_dir)
     for key in ("permeability", "porosity", "residual", "alpha"):
+        assert files[key].is_relative_to(processed_dir)
         with rasterio.open(files[key]) as source:
             assert np.isfinite(source.read(1, masked=True)).all()
     with rasterio.open(files["porosity"]) as source:

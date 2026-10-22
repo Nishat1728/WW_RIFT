@@ -34,8 +34,8 @@ It does not imply that resampling creates new spatial or temporal information.
 
 | Provider key | Source | Coverage / native resolution | Status | RIFT conversion |
 |---|---|---|---|---|
-| `usgs_3dep_10m` | [USGS 3DEP 1/3 arc-second](https://www.usgs.gov/3d-elevation-program/about-3dep-products-services) | U.S.; approximately 10 m seamless bare-earth DEM | **working** | Save native NetCDF/GeoTIFF; reproject to selected RIFT grid |
-| `usgs_3dep_30m` | [USGS 3DEP 1 arc-second](https://www.usgs.gov/3d-elevation-program/about-3dep-products-services) | U.S. and neighboring areas; approximately 30 m | **working** | Save native NetCDF/GeoTIFF; reproject to selected RIFT grid |
+| `usgs_3dep_10m` | [USGS 3DEP 1/3 arc-second](https://www.usgs.gov/3d-elevation-program/about-3dep-products-services) | U.S.; approximately 10 m seamless bare-earth DEM | **working** | Save the returned WMS/py3dep dataset snapshot under `raw/`; convert and align under `processed/` |
+| `usgs_3dep_30m` | [USGS 3DEP 1 arc-second](https://www.usgs.gov/3d-elevation-program/about-3dep-products-services) | U.S. and neighboring areas; approximately 30 m | **working** | Save the returned WMS/py3dep dataset snapshot under `raw/`; convert and align under `processed/` |
 | `usgs_3dep_1m` | [USGS 3DEP 1 m](https://www.usgs.gov/3d-elevation-program/about-3dep-products-services) | Partial but expanding U.S. coverage | adapter needed | Tile/mosaic, verify coverage and vertical datum, then reproject |
 | `noaa_cudem` | [NOAA coastal elevation models / CUDEM](https://www.ncei.noaa.gov/products/coastal-elevation-models) | U.S. coastal topobathymetry; about 3 m or 10 m products | adapter needed | Resolve vertical datum, mosaic, and reproject |
 | `copernicus_glo30` | [Copernicus DEM GLO-30](https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM) | Global land; 30 m | **working** | Save public COG tiles unchanged, mosaic, record native vertical reference, and reproject |

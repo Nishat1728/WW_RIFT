@@ -710,7 +710,11 @@ def _rasterize_property(data: gpd.GeoDataFrame, field: str, grid: GridSpec) -> n
         raise KeyError(f"Selected soil product is missing {field!r}.")
     valid = data[data.geometry.notna() & pd.to_numeric(data[field], errors="coerce").notna()].copy()
     if valid.empty:
-        raise ValueError(f"Selected soil product has no finite {field!r} values.")
+        # Keep the native product unchanged and let ``prepare_ssurgo`` apply an
+        # explicit user constant (or emit its normal NEEDS USER INPUT report).
+        # Raising here prevented the documented manual-fill path from handling
+        # a provider field that is present but entirely null.
+        return np.full(grid.node_shape, np.nan, dtype="float64")
     return rasterize(
         [(geometry, float(value)) for geometry, value in zip(valid.geometry, valid[field])],
         out_shape=grid.node_shape, transform=_node_transform(grid), fill=np.nan,
@@ -893,23 +897,57 @@ def prepare_ssurgo(
             f"Accepted {accepted_values.size} active residual/porosity inconsistencies "
             f"smaller than the configured tolerance {residual_porosity_tolerance}."
         )
-    if material_values.size:
+    material_correction_count = 0
+    if material_values.size and {"porosity", "residual"}.issubset(manual_fill_values):
+        # A user-approved pair of constants may resolve only the materially
+        # invalid processed cells.  Valid provider values and the raw SSURGO
+        # product remain unchanged; the correction is explicitly counted.
+        manual_porosity = _validate_manual_soil_value(
+            "porosity", manual_fill_values["porosity"]
+        )
+        manual_residual = _validate_manual_soil_value(
+            "residual", manual_fill_values["residual"]
+        )
+        material_correction_count = int(np.count_nonzero(material_violation))
+        arrays["porosity"][material_violation] = manual_porosity
+        arrays["residual"][material_violation] = manual_residual
+        manual_resolutions["porosity"]["material_violation_nodes"] = material_correction_count
+        manual_resolutions["residual"]["material_violation_nodes"] = material_correction_count
+        relationship_gap = arrays["residual"] - arrays["porosity"]
+        relationship_violation = node_mask & (relationship_gap >= 0.0)
+        at_tolerance = np.isclose(
+            relationship_gap,
+            residual_porosity_tolerance,
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        material_violation = relationship_violation & (
+            (relationship_gap > residual_porosity_tolerance) | at_tolerance
+        )
+        coverage["residual_porosity_check"].update(
+            values_modified=True,
+            material_violation_nodes_corrected=material_correction_count,
+            remaining_materially_invalid_nodes=int(np.count_nonzero(material_violation)),
+            correction_mode="user_constants_processed_copy_only",
+        )
+    if material_values.size and material_violation.any():
         coverage.update(
             status="FAILED",
             failure=(
                 "residual saturation is not less than porosity and the gap is at "
-                f"least {residual_porosity_tolerance}"
+                f"least {residual_porosity_tolerance}; provide explicit manual "
+                "porosity and residual constants or a corrected local product"
             ),
         )
     if coverage_report_path is not None:
         Path(coverage_report_path).write_text(
             json.dumps(coverage, indent=2), encoding="utf-8"
         )
-    if material_values.size:
+    if material_violation.any():
         raise ValueError(
             "Soil residual saturation must be less than porosity unless the gap is "
             "smaller than soil.options.residual_porosity_tolerance. "
-            f"Found {material_values.size} material active-node violations."
+            f"Found {int(np.count_nonzero(material_violation))} material active-node violations."
         )
     ksat = np.clip(permeability * WATER_INTRINSIC_TO_KSAT, 1e-9, 1e-3)
     suction = np.clip(1.0 / np.maximum(alpha * 1000.0 * 9.80665, 1e-12), 0.01, 2.0)

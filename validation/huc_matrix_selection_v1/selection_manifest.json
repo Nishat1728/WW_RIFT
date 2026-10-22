@@ -1,0 +1,549 @@
+{
+  "schema": "riftprep-conus-huc-selection-v1",
+  "created_utc": "2026-10-12T03:45:45.085067+00:00",
+  "fixed_seed": 20261011,
+  "selection_algorithm": "For each level in HUC4,HUC8,HUC10,HUC12 order, rank eligible codes by SHA256('<seed>:<level>:<huc>') ascending and take the requested count after excluding ancestor/descendant overlaps with earlier levels.",
+  "replacement": false,
+  "cross_level_ancestor_descendant_overlap_allowed": false,
+  "sample_counts": {
+    "4": 4,
+    "8": 6,
+    "10": 8,
+    "12": 10
+  },
+  "source_metadata": {
+    "path": "source_metadata.json",
+    "sha256": "7c51682d672d0454f36ed8f4ad89cde9665ecede0eb0326493abc676995b5980"
+  },
+  "candidate_metadata": {
+    "path": "candidate_metadata.json",
+    "sha256": "4d9a02ad892ca6d556fb8e449f6047da86cd7d1703f5ad06219c67f3ea333f49"
+  },
+  "source_catalog": {
+    "path": "wbd_authoritative_catalog.jsonl.gz",
+    "records": 124680,
+    "bytes": 5579009,
+    "sha256": "17c765145cbf031111c3c3e07cd3be32409aeedaf2319f2fa07feb0dae6d3a4e",
+    "canonical_jsonl_sha256": "ac19179ecc905907889755fc9c2eac16cf6cc04b69d87d1963bfd349783df3e6",
+    "compression": "gzip-mtime-0"
+  },
+  "eligible_catalog": {
+    "path": "eligible_conus_hucs.jsonl.gz",
+    "records": 96600,
+    "bytes": 4854675,
+    "sha256": "3dab07c709444f26d3127052662837645072ba2a2fdb2da6b79d6779d7606dd4",
+    "canonical_jsonl_sha256": "71f0d2a52461417545592b519f2fd7d62f815400c776f9abfe7b728fa1de0a89",
+    "compression": "gzip-mtime-0"
+  },
+  "selected": {
+    "12": [
+      {
+        "level": 12,
+        "object_id": 20765,
+        "huc": "111101010104",
+        "name": "Rowland Creek-Polecat Creek",
+        "states_raw": "OK",
+        "hu_type": "S",
+        "area_sqkm": 72.46,
+        "to_huc": "111101010105",
+        "tnmid": "{313A4AE3-C093-461C-9326-624AAAC3EEC6}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "OK"
+        ],
+        "nominal_30m_cells": 80512,
+        "selection_score_sha256": "0000b7ab769a21478d4db230341776c98a1b826dcfdeb958f09cc035b96e32f8"
+      },
+      {
+        "level": 12,
+        "object_id": 62991,
+        "huc": "102802030304",
+        "name": "East Fork Little Chariton River",
+        "states_raw": "MO",
+        "hu_type": "S",
+        "area_sqkm": 76.18,
+        "to_huc": "102802030502",
+        "tnmid": "{D492FA1C-F604-4034-A244-2E66C53E64C7}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "MO"
+        ],
+        "nominal_30m_cells": 84645,
+        "selection_score_sha256": "0001a325216ec2d08eee3049b63dfa48a02c61dc3585ea36cc9587133e68fde4"
+      },
+      {
+        "level": 12,
+        "object_id": 406,
+        "huc": "171200080702",
+        "name": "Augustine Canyon",
+        "states_raw": "OR",
+        "hu_type": "S",
+        "area_sqkm": 101.21,
+        "to_huc": "171200080704",
+        "tnmid": "{087E9FF8-01B0-45A9-B9A6-42D9FE121533}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "OR"
+        ],
+        "nominal_30m_cells": 112456,
+        "selection_score_sha256": "000275631884bc4d423920775894f47897eb5c2cbff38aaa47fabc81efbc3070"
+      },
+      {
+        "level": 12,
+        "object_id": 3832,
+        "huc": "070802070801",
+        "name": "Township of Lincoln",
+        "states_raw": "IA",
+        "hu_type": "S",
+        "area_sqkm": 44.15,
+        "to_huc": "070802070804",
+        "tnmid": "{96EF1242-0591-49A8-97A6-AB74B5505015}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "IA"
+        ],
+        "nominal_30m_cells": 49056,
+        "selection_score_sha256": "00027da99fe99e9d333baf7b68ef76514f1e4b97cd9e3e9c03dd71c4a626b892"
+      },
+      {
+        "level": 12,
+        "object_id": 20427,
+        "huc": "110300170103",
+        "name": "Wildcat Creek",
+        "states_raw": "KS",
+        "hu_type": "S",
+        "area_sqkm": 98.34,
+        "to_huc": "110300170104",
+        "tnmid": "{F98387D9-0454-4F6A-80C6-63DD6FE6A6F5}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "KS"
+        ],
+        "nominal_30m_cells": 109267,
+        "selection_score_sha256": "000291fe03041add3616b46f946e1b02079c79afc24bbad2fed5aa1b2d416808"
+      },
+      {
+        "level": 12,
+        "object_id": 43254,
+        "huc": "020502010706",
+        "name": "Alder Run",
+        "states_raw": "PA",
+        "hu_type": "S",
+        "area_sqkm": 62.08,
+        "to_huc": "020502010707",
+        "tnmid": "{B00AB989-D116-43C4-9036-9CB86DA67C3E}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "PA"
+        ],
+        "nominal_30m_cells": 68978,
+        "selection_score_sha256": "000347bb1cb769cae00f11d2b3ad2aa35943a6a4554227248b3e98e21e540d71"
+      },
+      {
+        "level": 12,
+        "object_id": 61528,
+        "huc": "110100080110",
+        "name": "Lower Gladden Creek",
+        "states_raw": "MO",
+        "hu_type": "S",
+        "area_sqkm": 51.72,
+        "to_huc": "110100080111",
+        "tnmid": "{DBC8773E-720A-4000-ABA1-165A6BCF5B7F}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "MO"
+        ],
+        "nominal_30m_cells": 57467,
+        "selection_score_sha256": "0003d3c7025716ee5a94c30ac00c1ced99d8ed59999c49c0bc9eb8148bcf8b17"
+      },
+      {
+        "level": 12,
+        "object_id": 71545,
+        "huc": "130600030106",
+        "name": "130600030106",
+        "states_raw": "NM",
+        "hu_type": "S",
+        "area_sqkm": 73.13,
+        "to_huc": "130600030107",
+        "tnmid": "{871C2994-0E86-40A2-ABED-E994A41081E3}",
+        "load_date_epoch_ms": 1358492923000,
+        "states": [
+          "NM"
+        ],
+        "nominal_30m_cells": 81256,
+        "selection_score_sha256": "00052fa3dea8783c1befa0a82fad8e2c7a7687ff7cadeda41fce992681c739fa"
+      },
+      {
+        "level": 12,
+        "object_id": 94543,
+        "huc": "030300030106",
+        "name": "Muddy Creek",
+        "states_raw": "NC",
+        "hu_type": "S",
+        "area_sqkm": 68.56,
+        "to_huc": "030300030108",
+        "tnmid": "{B291C75C-AA6D-446E-A0FC-AF9D7945975F}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "NC"
+        ],
+        "nominal_30m_cells": 76178,
+        "selection_score_sha256": "00054de6b4969ce10d1f20ba677312dd4f252ad9d3f6d20964edcc3669f36c0f"
+      },
+      {
+        "level": 12,
+        "object_id": 10042,
+        "huc": "170402150606",
+        "name": "170402150606",
+        "states_raw": "ID",
+        "hu_type": "C",
+        "area_sqkm": 48.13,
+        "to_huc": "CLOSED BASIN",
+        "tnmid": "{19FE4633-B9A1-4E2F-B4FB-D03E632DB2B3}",
+        "load_date_epoch_ms": 1480451790000,
+        "states": [
+          "ID"
+        ],
+        "nominal_30m_cells": 53478,
+        "selection_score_sha256": "00059df89b03ae46674b7e1926e8d59a64a1a846f424f3b218772e0c052679b5"
+      }
+    ],
+    "10": [
+      {
+        "level": 10,
+        "object_id": 16541,
+        "huc": "0707000508",
+        "name": "Otter Creek",
+        "states_raw": "WI",
+        "hu_type": "S",
+        "area_sqkm": 293.64,
+        "to_huc": null,
+        "tnmid": "{694F702A-5DAE-47F6-B947-23EBB7820D1E}",
+        "load_date_epoch_ms": 1723726881000,
+        "states": [
+          "WI"
+        ],
+        "nominal_30m_cells": 326267,
+        "selection_score_sha256": "0002c82c0edc8c926be73ca9a6b52d897058ab2265ae9db1d73184fd7e89bc2e"
+      },
+      {
+        "level": 10,
+        "object_id": 10320,
+        "huc": "1005001602",
+        "name": "Middle Fork Porcupine Creek",
+        "states_raw": "MT",
+        "hu_type": "S",
+        "area_sqkm": 391.28,
+        "to_huc": null,
+        "tnmid": "{E4DAE1B0-68AC-4649-8EF3-3BF2C6C6AAD4}",
+        "load_date_epoch_ms": 1723726881000,
+        "states": [
+          "MT"
+        ],
+        "nominal_30m_cells": 434756,
+        "selection_score_sha256": "0006e3dd986848bc31d4e2fd01004cc1d6dde4035cc334f952d473281275a6c9"
+      },
+      {
+        "level": 10,
+        "object_id": 17393,
+        "huc": "1008001502",
+        "name": "Rotten Grass Creek",
+        "states_raw": "MT",
+        "hu_type": "S",
+        "area_sqkm": 420.21,
+        "to_huc": null,
+        "tnmid": "{C3873BFD-0EDF-45F8-9683-89E1C0478C60}",
+        "load_date_epoch_ms": 1723726881000,
+        "states": [
+          "MT"
+        ],
+        "nominal_30m_cells": 466900,
+        "selection_score_sha256": "0016d23b37d9d90ff88b6815e9324f333e4f62822c39c1de6b542271ff286197"
+      },
+      {
+        "level": 10,
+        "object_id": 9449,
+        "huc": "1707030503",
+        "name": "Mill Creek",
+        "states_raw": "OR",
+        "hu_type": "S",
+        "area_sqkm": 185.36,
+        "to_huc": null,
+        "tnmid": "{7B5263A7-F60F-474C-944B-5161B565A565}",
+        "load_date_epoch_ms": 1723726881000,
+        "states": [
+          "OR"
+        ],
+        "nominal_30m_cells": 205956,
+        "selection_score_sha256": "0034cccb5b65b01f25c75c5fb7083739ce63ce8eb67f23ba157a9f7b2540980b"
+      },
+      {
+        "level": 10,
+        "object_id": 12413,
+        "huc": "0711000901",
+        "name": "Peruque Creek-Mississippi River",
+        "states_raw": "IL,MO",
+        "hu_type": "S",
+        "area_sqkm": 770.92,
+        "to_huc": null,
+        "tnmid": "{30A77DF8-574A-4992-B62C-EA631513B0B1}",
+        "load_date_epoch_ms": 1723726881000,
+        "states": [
+          "IL",
+          "MO"
+        ],
+        "nominal_30m_cells": 856578,
+        "selection_score_sha256": "0039107e089586a8cd516a3911f401c60f762ca0a81617ecf84c563d94412c8c"
+      },
+      {
+        "level": 10,
+        "object_id": 6311,
+        "huc": "1013020602",
+        "name": "Dogtooth Creek",
+        "states_raw": "ND",
+        "hu_type": "S",
+        "area_sqkm": 998.42,
+        "to_huc": null,
+        "tnmid": "{CCC65E44-6941-4A42-AB09-000259B318A4}",
+        "load_date_epoch_ms": 1723726881000,
+        "states": [
+          "ND"
+        ],
+        "nominal_30m_cells": 1109356,
+        "selection_score_sha256": "003d36f116b2f84cba6ea9a0600e9226b74c3ad6910f37d997461bd0c60aa695"
+      },
+      {
+        "level": 10,
+        "object_id": 16029,
+        "huc": "1502000404",
+        "name": "Upper Zuni River",
+        "states_raw": "NM",
+        "hu_type": "S",
+        "area_sqkm": 634.22,
+        "to_huc": null,
+        "tnmid": "{0D460177-BDFD-4C51-8917-5F1784DFA934}",
+        "load_date_epoch_ms": 1723726881000,
+        "states": [
+          "NM"
+        ],
+        "nominal_30m_cells": 704689,
+        "selection_score_sha256": "0045206fd65a3ac86fc5bf4a1f2e0b384c75d7e73db2399c8d0cb6cb6b4cf736"
+      },
+      {
+        "level": 10,
+        "object_id": 868,
+        "huc": "0302020304",
+        "name": "Wiggins Mill Reservoir-Contentnea Creek",
+        "states_raw": "NC",
+        "hu_type": "S",
+        "area_sqkm": 332.33,
+        "to_huc": null,
+        "tnmid": "{E745BB0D-50A2-41DB-8387-FDC76C939C6B}",
+        "load_date_epoch_ms": 1723726881000,
+        "states": [
+          "NC"
+        ],
+        "nominal_30m_cells": 369256,
+        "selection_score_sha256": "0045ee1435371ecdca50beb4d9299f48a26cafffe210ec5ee01178b9f63557fb"
+      }
+    ],
+    "8": [
+      {
+        "level": 8,
+        "object_id": 799,
+        "huc": "16060001",
+        "name": "Dixie Valley",
+        "states_raw": "NV",
+        "hu_type": null,
+        "area_sqkm": 10470.47,
+        "to_huc": null,
+        "tnmid": "{DC38AB2B-D16E-4CCA-BCA8-205FF2A42FB2}",
+        "load_date_epoch_ms": 1723803860000,
+        "states": [
+          "NV"
+        ],
+        "nominal_30m_cells": 11633856,
+        "selection_score_sha256": "00659336c82f96e61b41627126483324cb0f9d5185533dbab0aa19fb7e7dafcb"
+      },
+      {
+        "level": 8,
+        "object_id": 1824,
+        "huc": "14040109",
+        "name": "Vermilion",
+        "states_raw": "CO,WY",
+        "hu_type": null,
+        "area_sqkm": 2524.01,
+        "to_huc": null,
+        "tnmid": "{A28FAF78-C815-46A0-B5AB-B2E552C4E870}",
+        "load_date_epoch_ms": 1723803860000,
+        "states": [
+          "CO",
+          "WY"
+        ],
+        "nominal_30m_cells": 2804456,
+        "selection_score_sha256": "0067efcb46a56b29efc0769ed52e3cbee1c19ac62654216a8e5bbb680e26bd38"
+      },
+      {
+        "level": 8,
+        "object_id": 1567,
+        "huc": "08040302",
+        "name": "Castor",
+        "states_raw": "LA",
+        "hu_type": null,
+        "area_sqkm": 2479.35,
+        "to_huc": null,
+        "tnmid": "{D6C39AFE-4522-410B-B812-EDD579B1E5A6}",
+        "load_date_epoch_ms": 1723803860000,
+        "states": [
+          "LA"
+        ],
+        "nominal_30m_cells": 2754834,
+        "selection_score_sha256": "008edaa52dadb5f3e0279b86d8aaccbf0e01284275cc6dc5b282a59dbfafac7f"
+      },
+      {
+        "level": 8,
+        "object_id": 1014,
+        "huc": "17070106",
+        "name": "Klickitat",
+        "states_raw": "WA",
+        "hu_type": null,
+        "area_sqkm": 3501.91,
+        "to_huc": null,
+        "tnmid": "{E4532A65-23A8-4B30-85A4-611546442D18}",
+        "load_date_epoch_ms": 1723803860000,
+        "states": [
+          "WA"
+        ],
+        "nominal_30m_cells": 3891012,
+        "selection_score_sha256": "009a83311a95d3b33f1876edd1b83576b417cd72831c92f6c64668ed8c030669"
+      },
+      {
+        "level": 8,
+        "object_id": 634,
+        "huc": "10150002",
+        "name": "Niobrara Headwaters",
+        "states_raw": "NE,WY",
+        "hu_type": null,
+        "area_sqkm": 3838.46,
+        "to_huc": null,
+        "tnmid": "{B4F2220D-A908-44C7-BECC-A63CBE4403F5}",
+        "load_date_epoch_ms": 1723803860000,
+        "states": [
+          "NE",
+          "WY"
+        ],
+        "nominal_30m_cells": 4264956,
+        "selection_score_sha256": "00c96c409b7db3dd4f402a0e350a82ecfabc79b5e13bde696d2016eec8538e94"
+      },
+      {
+        "level": 8,
+        "object_id": 1240,
+        "huc": "05030202",
+        "name": "Upper Ohio-Shade",
+        "states_raw": "OH,WV",
+        "hu_type": null,
+        "area_sqkm": 3669.74,
+        "to_huc": null,
+        "tnmid": "{26B1839E-027E-4151-8346-CF8DF56361B6}",
+        "load_date_epoch_ms": 1723803860000,
+        "states": [
+          "OH",
+          "WV"
+        ],
+        "nominal_30m_cells": 4077489,
+        "selection_score_sha256": "00cc93af7d9dae65d0234d2018ba2dd84042e9ab379a2ee39c046d9c9dddd519"
+      }
+    ],
+    "4": [
+      {
+        "level": 4,
+        "object_id": 36,
+        "huc": "0509",
+        "name": "Middle Ohio",
+        "states_raw": "IN,KY,OH,WV",
+        "hu_type": null,
+        "area_sqkm": 23053.62,
+        "to_huc": null,
+        "tnmid": "{A477E6F7-600F-4449-B2C7-371C6FC6DDFC}",
+        "load_date_epoch_ms": 1723807464000,
+        "states": [
+          "IN",
+          "KY",
+          "OH",
+          "WV"
+        ],
+        "nominal_30m_cells": 25615134,
+        "selection_score_sha256": "03d27e41fbfe43fa4f04a9833bbf1488bf107d707d6e5e9a2033663d2f789d1a"
+      },
+      {
+        "level": 4,
+        "object_id": 187,
+        "huc": "1603",
+        "name": "Escalante Desert-Sevier Lake",
+        "states_raw": "NV,UT",
+        "hu_type": null,
+        "area_sqkm": 42670.06,
+        "to_huc": null,
+        "tnmid": "{06B7EBE2-D2DA-479C-BC22-51C3A8C0B2BF}",
+        "load_date_epoch_ms": 1723807464000,
+        "states": [
+          "NV",
+          "UT"
+        ],
+        "nominal_30m_cells": 47411178,
+        "selection_score_sha256": "06158773bf248d1922aa19392a19f07144b6b5d211904544636a02ecf8397af2"
+      },
+      {
+        "level": 4,
+        "object_id": 139,
+        "huc": "0408",
+        "name": "Southwestern Lake Huron",
+        "states_raw": "MI",
+        "hu_type": null,
+        "area_sqkm": 23665.79,
+        "to_huc": null,
+        "tnmid": "{49894FD9-0F26-4626-AD89-20CFB3A985C2}",
+        "load_date_epoch_ms": 1725381604000,
+        "states": [
+          "MI"
+        ],
+        "nominal_30m_cells": 26295323,
+        "selection_score_sha256": "06a770c02f1d3f1182d5b33a281dcf26a26da861ee1cb25768bd2e8af80fa6d6"
+      },
+      {
+        "level": 4,
+        "object_id": 202,
+        "huc": "0808",
+        "name": "Louisiana Coastal",
+        "states_raw": "LA",
+        "hu_type": null,
+        "area_sqkm": 37809.41,
+        "to_huc": null,
+        "tnmid": "{2DBC120F-DDC2-466D-96DE-770DE43D9F7E}",
+        "load_date_epoch_ms": 1645550544000,
+        "states": [
+          "LA"
+        ],
+        "nominal_30m_cells": 42010456,
+        "selection_score_sha256": "0869b3e95a23e1ab017cc10a38a55d4f3f95b4621a9f17b2f04f633e6a763143"
+      }
+    ]
+  },
+  "validation": {
+    "exact_counts": true,
+    "exact_code_lengths": true,
+    "decimal_codes": true,
+    "unique_within_and_across_levels": true,
+    "all_selected_are_eligible": true,
+    "no_selected_ancestor_descendant_overlap": true,
+    "seeded_scores_match": true,
+    "deterministic_recomputation_matches": true
+  },
+  "artifacts_written_before_selection_manifest": [
+    "source_metadata.json",
+    "wbd_authoritative_catalog.jsonl.gz",
+    "candidate_metadata.json",
+    "eligible_conus_hucs.jsonl.gz"
+  ],
+  "workflow_jobs_launched": false
+}

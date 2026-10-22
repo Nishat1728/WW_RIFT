@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.ticker import MaxNLocator
 
 from .config import GridSpec
 
@@ -98,13 +99,15 @@ def _map(ax, data, grid, title, label, cmap="viridis", **kwargs):
     ax.set_aspect("equal")
     cb = ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.025)
     cb.set_label(label)
-    ax.ticklabel_format(style="plain", useOffset=False)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=3))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=3))
+    ax.ticklabel_format(style="sci", scilimits=(0, 0), useOffset=False)
     add_map_furniture(ax, grid)
     return image
 
 
 def plot_dem_domain(original_dem, final_dem, node_mask, grid: GridSpec, wall_elevation_m=9999.0):
-    fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.65), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.8), constrained_layout=True)
     interior = np.where(node_mask, original_dem, np.nan)
     vmin, vmax = np.nanpercentile(interior, [1, 99])
     _map(axes[0], original_dem, grid, "a  Downloaded DEM", "Elevation (m)", vmin=vmin, vmax=vmax, cmap="terrain")
@@ -119,7 +122,7 @@ def plot_dem_domain(original_dem, final_dem, node_mask, grid: GridSpec, wall_ele
 
 
 def plot_river_bathymetry(original_dem, burned_dem, burn_depth, grid: GridSpec):
-    fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.65), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.8), constrained_layout=True)
     vmin, vmax = np.nanpercentile(original_dem, [1, 99])
     _map(axes[0], original_dem, grid, "a  Terrain before burning", "Elevation (m)", cmap="terrain", vmin=vmin, vmax=vmax)
     _map(axes[1], burn_depth, grid, "b  Applied channel depth", "Depth (m)", cmap="Blues")
@@ -185,7 +188,7 @@ def plot_hydrographs(hydrographs: Mapping[str, tuple[np.ndarray, np.ndarray]]):
 def plot_input_atlas(layers: Mapping[str, tuple[np.ndarray, str, str]], grid: GridSpec, columns: int = 3):
     count = len(layers)
     rows = int(np.ceil(count / columns))
-    fig, axes = plt.subplots(rows, columns, figsize=(7.2, 2.45 * rows), constrained_layout=True, squeeze=False)
+    fig, axes = plt.subplots(rows, columns, figsize=(4.5 * columns, 4.0 * rows), constrained_layout=True, squeeze=False)
     for ax, (name, (data, units, cmap)) in zip(axes.flat, layers.items()):
         _map(ax, data, grid, name, units, cmap=cmap)
     for ax in axes.flat[count:]:

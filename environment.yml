@@ -35,4 +35,7 @@ dependencies:
       - dataretrieval
       - herbie-data
       - earthaccess
+      - hf-hydrodata==1.4.17
+      - meshpy==2026.1.1
+      - rosetta-soil==0.3.2
       - -e .

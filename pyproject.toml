@@ -28,7 +28,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-watershed-workflow = ["watershed-workflow>=2.1"]
+watershed-workflow = [
+  "watershed-workflow>=2.1",
+  "hf-hydrodata>=1.4,<2",
+  "meshpy>=2026.1,<2027",
+  "rosetta-soil>=0.3,<0.4",
+]
 notebook = ["ipywidgets>=8", "jupyterlab>=4", "nbclient>=0.10", "nbformat>=5.10"]
 era5 = ["cdsapi>=0.7"]
 daymet = ["earthaccess>=0.14", "pydap>=3.5.6"]

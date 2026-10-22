@@ -1,0 +1,466 @@
+{
+  "schema": "riftprep-conus-huc-selection-v2",
+  "created_utc": "2026-10-14T14:43:11.349334+00:00",
+  "fixed_seed": 20261014,
+  "selection_algorithm": "For each level in HUC2,HUC4,HUC8,HUC12 order, rank eligible codes by SHA256('<seed>:<level>:<huc>') ascending and take the requested count after excluding ancestor/descendant overlaps with earlier levels.",
+  "replacement": false,
+  "cross_level_ancestor_descendant_overlap_allowed": false,
+  "sample_counts": {
+    "2": 2,
+    "4": 4,
+    "8": 6,
+    "12": 10
+  },
+  "source_metadata": {
+    "path": "source_metadata.json",
+    "sha256": "bd57e0575f6bb99b20a12e12f635b7071d845a284a4218845f44b9e5425c784a"
+  },
+  "candidate_metadata": {
+    "path": "candidate_metadata.json",
+    "sha256": "42f523d6ab2d20c957818da5b71942bf9a23e4e8bb33191be7e0d5751a7dcf18"
+  },
+  "source_catalog": {
+    "path": "wbd_authoritative_catalog.jsonl.gz",
+    "records": 105791,
+    "bytes": 4755023,
+    "sha256": "5f413b40e36a5b0d0778514b31ea74fc04997bd348d96e2e11287fe65b8f0951",
+    "canonical_jsonl_sha256": "868feaa0d06aa7253bc3dea21dce520e8773f4a5b9443e57910b2bca6e1c91c0",
+    "compression": "gzip-mtime-0"
+  },
+  "eligible_catalog": {
+    "path": "eligible_conus_hucs.jsonl.gz",
+    "records": 82189,
+    "bytes": 4144101,
+    "sha256": "ad0934cf721fc3c46b911cad7793a991344c428d5edc5f34c4a8fec1d6e051fc",
+    "canonical_jsonl_sha256": "5a3b16e50246639b74b4ae5952e58f2eb015e8bd1e3f3ee5d3be2699a142cbe1",
+    "compression": "gzip-mtime-0"
+  },
+  "selected": {
+    "12": [
+      {
+        "level": 12,
+        "object_id": 75896,
+        "huc": "170200130205",
+        "name": "170200130205-Crab Creek",
+        "states_raw": "WA",
+        "hu_type": "S",
+        "area_sqkm": 61.55,
+        "to_huc": "170200130207",
+        "tnmid": "{C2191CF2-4C60-421F-8518-C0E99D7799AB}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "WA"
+        ],
+        "nominal_30m_cells": 68389,
+        "selection_score_sha256": "000016e8f174405edd87fe35f9ab33bce616aabb52fe3a6ef814723c6be7cbd2"
+      },
+      {
+        "level": 12,
+        "object_id": 97833,
+        "huc": "101600070303",
+        "name": "Town of Onaka",
+        "states_raw": "SD",
+        "hu_type": "S",
+        "area_sqkm": 101.79,
+        "to_huc": "101600070304",
+        "tnmid": "{05FD8853-D445-4682-8EBD-F7D15855CAEB}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "SD"
+        ],
+        "nominal_30m_cells": 113101,
+        "selection_score_sha256": "0000778736bf9d5dd170fc873976728278962966defe125067c63811a954f8bb"
+      },
+      {
+        "level": 12,
+        "object_id": 98117,
+        "huc": "111403020201",
+        "name": "Upper Cuthand Creek",
+        "states_raw": "TX",
+        "hu_type": "S",
+        "area_sqkm": 129.84,
+        "to_huc": "111403020202",
+        "tnmid": "{BC36DF7A-A5D9-438E-B3AD-836902347713}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "TX"
+        ],
+        "nominal_30m_cells": 144267,
+        "selection_score_sha256": "00027473f118273f77840c713dc30738a3d0746a60960ffe87931003d75cc6de"
+      },
+      {
+        "level": 12,
+        "object_id": 51492,
+        "huc": "160203061312",
+        "name": "160203061312",
+        "states_raw": "UT",
+        "hu_type": "S",
+        "area_sqkm": 130.8,
+        "to_huc": "160203061704",
+        "tnmid": "{4118661E-47F9-4870-ACB0-54B0FC93C2EF}",
+        "load_date_epoch_ms": 1358492945000,
+        "states": [
+          "UT"
+        ],
+        "nominal_30m_cells": 145334,
+        "selection_score_sha256": "000279be45fa3a461ef389864770f372c5ab1e2e5ad2cdab9dbda64e92358fbb"
+      },
+      {
+        "level": 12,
+        "object_id": 59380,
+        "huc": "180101080101",
+        "name": "North Fork Ten Mile River",
+        "states_raw": "CA",
+        "hu_type": "S",
+        "area_sqkm": 100.91,
+        "to_huc": "180101080103",
+        "tnmid": "{57203243-8610-401B-9D53-F3A03339C5FD}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "CA"
+        ],
+        "nominal_30m_cells": 112123,
+        "selection_score_sha256": "00033dabb50bf993888d40a68e2b6087eabe180667b404e9899d05338c3deb82"
+      },
+      {
+        "level": 12,
+        "object_id": 47477,
+        "huc": "070600010102",
+        "name": "Upper Coon Creek",
+        "states_raw": "WI",
+        "hu_type": "S",
+        "area_sqkm": 49.01,
+        "to_huc": "070600010103",
+        "tnmid": "{1077137E-A2B8-436A-ACDD-ECF1A94FC74C}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "WI"
+        ],
+        "nominal_30m_cells": 54456,
+        "selection_score_sha256": "0004ef2f45d2f13755f275f876874eb76e146be90b4bd2fedabae557e971ca6a"
+      },
+      {
+        "level": 12,
+        "object_id": 89700,
+        "huc": "030901010503",
+        "name": "Bay Lake-Reedy Creek",
+        "states_raw": "FL",
+        "hu_type": "M",
+        "area_sqkm": 150.66,
+        "to_huc": "030901010504",
+        "tnmid": "{0DE2C31E-2E51-4457-BA3D-9372D758509D}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "FL"
+        ],
+        "nominal_30m_cells": 167400,
+        "selection_score_sha256": "00052769d5ebb2514aa4e47a28baad9e1f563545086bc2c294bd400f38286973"
+      },
+      {
+        "level": 12,
+        "object_id": 909,
+        "huc": "101201110703",
+        "name": "Brehm School-Elk Creek",
+        "states_raw": "SD",
+        "hu_type": "S",
+        "area_sqkm": 119.56,
+        "to_huc": "101201110704",
+        "tnmid": "{D0F42A08-593A-4D75-A3F7-5DA5BBCC377F}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "SD"
+        ],
+        "nominal_30m_cells": 132845,
+        "selection_score_sha256": "000746fbd5523487e37e366326f94d6749df818d267ac749e54dd34d61d1f13e"
+      },
+      {
+        "level": 12,
+        "object_id": 100210,
+        "huc": "090300010503",
+        "name": "Thomas Lake",
+        "states_raw": "MN",
+        "hu_type": "S",
+        "area_sqkm": 54.91,
+        "to_huc": "090300010505",
+        "tnmid": "{28A3F9A4-E541-40E9-A4F8-0CB1CC2F1039}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "MN"
+        ],
+        "nominal_30m_cells": 61012,
+        "selection_score_sha256": "000993d20396865327342f6f2085db204f814c21ddd7bb042a6f12e800499090"
+      },
+      {
+        "level": 12,
+        "object_id": 15860,
+        "huc": "120302020903",
+        "name": "Sandy Creek-Kickapoo Creek",
+        "states_raw": "TX",
+        "hu_type": "M",
+        "area_sqkm": 164.5,
+        "to_huc": "120302021104",
+        "tnmid": "{6B2CF33A-4CB8-4993-A9C0-3B34B50FEE45}",
+        "load_date_epoch_ms": 1723704945000,
+        "states": [
+          "TX"
+        ],
+        "nominal_30m_cells": 182778,
+        "selection_score_sha256": "000ad2370a90e671507c1aa021386a74e28d1b26c9ecef7a0741c85844f7fa7f"
+      }
+    ],
+    "8": [
+      {
+        "level": 8,
+        "object_id": 1798,
+        "huc": "17010204",
+        "name": "Middle Clark Fork",
+        "states_raw": "ID,MT",
+        "hu_type": null,
+        "area_sqkm": 5140.06,
+        "to_huc": null,
+        "tnmid": "{72AB7B7C-0B1C-4742-986E-F26F3C5C0F14}",
+        "load_date_epoch_ms": 1723803860000,
+        "states": [
+          "ID",
+          "MT"
+        ],
+        "nominal_30m_cells": 5711178,
+        "selection_score_sha256": "0026912e162e313dc06febf0f1b3deec72783889e0a7d2c11fe9dfc8885675a2"
+      },
+      {
+        "level": 8,
+        "object_id": 2117,
+        "huc": "10130303",
+        "name": "Grand",
+        "states_raw": "ND,SD",
+        "hu_type": null,
+        "area_sqkm": 6207.5,
+        "to_huc": null,
+        "tnmid": "{73BD4049-F124-45C7-A295-63B8273E3AA4}",
+        "load_date_epoch_ms": 1723803860000,
+        "states": [
+          "ND",
+          "SD"
+        ],
+        "nominal_30m_cells": 6897223,
+        "selection_score_sha256": "002d06361775d7b36a5c7fb5690fb7c33e5234f87a62ba69b6b381a2ccca5d28"
+      },
+      {
+        "level": 8,
+        "object_id": 1133,
+        "huc": "16010203",
+        "name": "Little Bear-Logan",
+        "states_raw": "ID,UT",
+        "hu_type": null,
+        "area_sqkm": 2289.78,
+        "to_huc": null,
+        "tnmid": "{D856EF1B-AED2-49EC-94B5-1D81CA0FBDFB}",
+        "load_date_epoch_ms": 1723803860000,
+        "states": [
+          "ID",
+          "UT"
+        ],
+        "nominal_30m_cells": 2544201,
+        "selection_score_sha256": "0037d9f42e2fd244b2ef6bc7836785080409074319d5fa380b24a0426a00ee5a"
+      },
+      {
+        "level": 8,
+        "object_id": 1840,
+        "huc": "07140106",
+        "name": "Big Muddy",
+        "states_raw": "IL",
+        "hu_type": null,
+        "area_sqkm": 6178.51,
+        "to_huc": null,
+        "tnmid": "{05A06A72-F475-4C1D-8B83-F8626480F85E}",
+        "load_date_epoch_ms": 1723803860000,
+        "states": [
+          "IL"
+        ],
+        "nominal_30m_cells": 6865012,
+        "selection_score_sha256": "0037e4131b134f6e0f02411df87b1b0d38ea32c0c736382262a007db0f991033"
+      },
+      {
+        "level": 8,
+        "object_id": 637,
+        "huc": "01080104",
+        "name": "Waits River-Connecticut River",
+        "states_raw": "NH,VT",
+        "hu_type": null,
+        "area_sqkm": 1339.58,
+        "to_huc": null,
+        "tnmid": "{E6124D08-F32B-4F12-A0EE-6BFF083F562C}",
+        "load_date_epoch_ms": 1723803860000,
+        "states": [
+          "NH",
+          "VT"
+        ],
+        "nominal_30m_cells": 1488423,
+        "selection_score_sha256": "004154bc2253887316f878b481ede66234adde9d4b6ae8bbc49b812c4e06ba34"
+      },
+      {
+        "level": 8,
+        "object_id": 708,
+        "huc": "12090106",
+        "name": "Middle Colorado",
+        "states_raw": "TX",
+        "hu_type": null,
+        "area_sqkm": 5213.77,
+        "to_huc": null,
+        "tnmid": "{02681065-7243-43DF-AE3D-2C31D65B11B1}",
+        "load_date_epoch_ms": 1723803860000,
+        "states": [
+          "TX"
+        ],
+        "nominal_30m_cells": 5793078,
+        "selection_score_sha256": "00c2b54ca6d97257f712aff22133c5ad38b82025547048ddf640188667fbc8d6"
+      }
+    ],
+    "4": [
+      {
+        "level": 4,
+        "object_id": 39,
+        "huc": "0514",
+        "name": "Lower Ohio",
+        "states_raw": "IL,IN,KY",
+        "hu_type": null,
+        "area_sqkm": 32632.8,
+        "to_huc": null,
+        "tnmid": "{CF2DDBD7-15E1-4D0D-A7B1-81969768B536}",
+        "load_date_epoch_ms": 1723807464000,
+        "states": [
+          "IL",
+          "IN",
+          "KY"
+        ],
+        "nominal_30m_cells": 36258667,
+        "selection_score_sha256": "000ceba9fb5f07287a678f02b05a5b4f913ac7e75e5850e0da3995a54b606e17"
+      },
+      {
+        "level": 4,
+        "object_id": 34,
+        "huc": "0302",
+        "name": "Neuse-Pamlico",
+        "states_raw": "NC",
+        "hu_type": null,
+        "area_sqkm": 36985.66,
+        "to_huc": null,
+        "tnmid": "{E3A2BA98-7EAC-4EC8-8FBA-65AA95D408FA}",
+        "load_date_epoch_ms": 1723807464000,
+        "states": [
+          "NC"
+        ],
+        "nominal_30m_cells": 41095178,
+        "selection_score_sha256": "01ad4e82e950a8e830f36e514c378eecae809b2111356ba7c549542938b5565c"
+      },
+      {
+        "level": 4,
+        "object_id": 228,
+        "huc": "0405",
+        "name": "Southeastern Lake Michigan",
+        "states_raw": "IN,MI",
+        "hu_type": null,
+        "area_sqkm": 33488.6,
+        "to_huc": null,
+        "tnmid": "{13EDE639-F510-44D2-B6BF-5726BF2F50AB}",
+        "load_date_epoch_ms": 1723807464000,
+        "states": [
+          "IN",
+          "MI"
+        ],
+        "nominal_30m_cells": 37209556,
+        "selection_score_sha256": "0d15bf9e14774385dbc9fd3801e00032af4281e4b571b69faaf0654039480c83"
+      },
+      {
+        "level": 4,
+        "object_id": 159,
+        "huc": "0707",
+        "name": "Wisconsin",
+        "states_raw": "MI,WI",
+        "hu_type": null,
+        "area_sqkm": 30905.65,
+        "to_huc": null,
+        "tnmid": "{5A2F30C9-D09A-4463-A58F-42D846D5BF93}",
+        "load_date_epoch_ms": 1723807464000,
+        "states": [
+          "MI",
+          "WI"
+        ],
+        "nominal_30m_cells": 34339612,
+        "selection_score_sha256": "0f1813812e5e4889486688444968e3c94bea8ec0905164cbaf9149079e28d2cd"
+      }
+    ],
+    "2": [
+      {
+        "level": 2,
+        "object_id": 6,
+        "huc": "06",
+        "name": "Tennessee Region",
+        "states_raw": "AL,GA,KY,MS,NC,SC,TN,VA,WV",
+        "hu_type": null,
+        "area_sqkm": 105948.46,
+        "to_huc": null,
+        "tnmid": "{142390F9-84A3-42CF-A41C-ED4F0EB4E6FC}",
+        "load_date_epoch_ms": 1645028483000,
+        "states": [
+          "AL",
+          "GA",
+          "KY",
+          "MS",
+          "NC",
+          "SC",
+          "TN",
+          "VA",
+          "WV"
+        ],
+        "nominal_30m_cells": 117720512,
+        "selection_score_sha256": "69465aeb9777671fc708e894ba9635f67f777911ff7dd4c4119dfd7695894b34"
+      },
+      {
+        "level": 2,
+        "object_id": 22,
+        "huc": "02",
+        "name": "Mid Atlantic Region",
+        "states_raw": "CT,DC,DE,MA,MD,NJ,NY,PA,RI,VA,VT,WV",
+        "hu_type": null,
+        "area_sqkm": 276482.71,
+        "to_huc": null,
+        "tnmid": "{4AEF9DDF-A9C6-400E-8FD8-180FD5C29F69}",
+        "load_date_epoch_ms": 1621260273000,
+        "states": [
+          "CT",
+          "DC",
+          "DE",
+          "MA",
+          "MD",
+          "NJ",
+          "NY",
+          "PA",
+          "RI",
+          "VA",
+          "VT",
+          "WV"
+        ],
+        "nominal_30m_cells": 307203012,
+        "selection_score_sha256": "df9a0d6341ea3fcd1aa4ec351ff0bc8bae49531e853cc855951039e01e6da92f"
+      }
+    ]
+  },
+  "validation": {
+    "exact_counts": true,
+    "exact_code_lengths": true,
+    "decimal_codes": true,
+    "unique_within_and_across_levels": true,
+    "all_selected_are_eligible": true,
+    "no_selected_ancestor_descendant_overlap": true,
+    "seeded_scores_match": true,
+    "deterministic_recomputation_matches": true
+  },
+  "artifacts_written_before_selection_manifest": [
+    "source_metadata.json",
+    "wbd_authoritative_catalog.jsonl.gz",
+    "candidate_metadata.json",
+    "eligible_conus_hucs.jsonl.gz"
+  ],
+  "workflow_jobs_launched": false
+}

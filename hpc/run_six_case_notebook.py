@@ -20,6 +20,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hpc.run_six_case_30m import CASE_KEYS, make_case
+from riftprep.config import resolve_simulation_ready_directory
 
 
 def _duration(seconds: float) -> str:
@@ -58,7 +59,8 @@ def _validate(case_key: str, output_root: Path, total_seconds: float) -> dict:
     dem_download = float(
         timings.loc[timings.stage.eq("download_raw_dem"), "wall_seconds"].sum()
     )
-    with (case_root / "rift_inputs/dem.asc").open(encoding="utf-8") as stream:
+    simulation_ready = resolve_simulation_ready_directory(case_root)
+    with (simulation_ready / "dem.asc").open(encoding="utf-8") as stream:
         header = dict(next(stream).split(maxsplit=1) for _ in range(6))
     failures = []
     if resolved["cache"]["mode"] != "fresh":

@@ -135,7 +135,8 @@ plots:
 
 simulation:
   start_time_s: 0
-  end_time_s: 86400
+  # Omit end_time_s to match the enabled rainfall period automatically.
+  # An explicit end_time_s is an advanced override, in elapsed simulation seconds.
   integration: rk2
   courant_limit: 0.25
   gpu_device: 0

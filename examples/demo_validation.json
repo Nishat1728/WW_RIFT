@@ -1,0 +1,41 @@
+{
+  "schema": "riftprep-demo-validation-v1",
+  "tested_date": "2026-10-22",
+  "environment": "Linux, Storrs HPC compute node",
+  "status": "passed",
+  "unit_tests_passed": 81,
+  "notebook": "examples/HUC12_Demo.ipynb",
+  "configuration": "examples/demo_huc12_180101080101.yaml",
+  "huc_code": "180101080101",
+  "cache_mode": "fresh",
+  "native_dem_product_m": 30,
+  "rift_dem_cellsize_m": 30,
+  "rainfall_start_utc": "2023-06-10T00:00:00Z",
+  "rainfall_end_utc": "2023-06-12T00:00:00Z",
+  "simulation_duration_seconds": 172800,
+  "rainfall_records_including_initial": 49,
+  "input_statuses": {
+    "dem": "PASSED",
+    "initial_state": "PASSED",
+    "hydrography": "PASSED",
+    "land_cover": "PASSED",
+    "soil": "PASSED",
+    "rainfall": "PASSED"
+  },
+  "rainfall_zero_replacement_cells": 0,
+  "manual_land_cover_values": {},
+  "manual_soil_values": {},
+  "raw_product_count": 10,
+  "raw_checksums_verified": 10,
+  "raw_products_all_isolated": true,
+  "raw_product_modified": false,
+  "download_raw_dem_wall_seconds": 37.951468957122415,
+  "total_notebook_wall_seconds": 138.93609417276457,
+  "case_bytes": 203225886,
+  "failures": [],
+  "notes": [
+    "Input preparation was executed end to end; the RIFT solver was not run.",
+    "Timing and storage reflect this run, not a guarantee for other machines or provider states.",
+    "Only preview maps and this summary are distributed; users acquire their own raw data."
+  ]
+}

@@ -12,6 +12,7 @@ import rasterio
 import xarray as xr
 
 from riftprep.artifacts import sha256
+from riftprep.config import resolve_simulation_ready_directory
 
 
 def read_ascii_cellsize(path: Path) -> float:
@@ -37,9 +38,10 @@ def audit_case(case_root: Path) -> dict:
         failures.append("processing began before all raw stages completed")
     dem_path = Path(manifest["raw_products"]["dem"]["files"]["raster"])
     with rasterio.open(dem_path) as source:
-        native_dem_resolution = [abs(float(value)) for value in source.res]
-        native_dem_shape = [source.height, source.width]
-    model_resolution = read_ascii_cellsize(case_root / "rift_inputs/dem.asc")
+        source_dem_resolution = [abs(float(value)) for value in source.res]
+        source_dem_shape = [source.height, source.width]
+    simulation_ready = resolve_simulation_ready_directory(case_root)
+    model_resolution = read_ascii_cellsize(simulation_ready / "dem.asc")
     raw_plots = {
         product: Path(details["files"]["plot"]).is_file()
         for product, details in manifest["raw_products"].items()
@@ -51,7 +53,7 @@ def audit_case(case_root: Path) -> dict:
     rainfall_raw = Path(manifest["raw_products"]["rainfall"]["files"]["netcdf"])
     with xr.open_dataset(rainfall_raw) as source:
         raw_rainfall_records = int(source.sizes["time"])
-    with h5py.File(case_root / "rift_inputs/rainfall_ats.h5") as source:
+    with h5py.File(simulation_ready / "rainfall_ats.h5") as source:
         rift_rainfall_records = len(source["precipitation rain [m s^-1]"])
         rift_rainfall_times = len(source["time [s]"])
     if rift_rainfall_records != 7 or rift_rainfall_times != 7:
@@ -68,8 +70,8 @@ def audit_case(case_root: Path) -> dict:
         "failures": failures,
         "raw_artifacts_verified": len(raw),
         "raw_plots": raw_plots,
-        "native_dem_resolution": native_dem_resolution,
-        "native_dem_shape": native_dem_shape,
+        "source_dem_resolution": source_dem_resolution,
+        "source_dem_shape": source_dem_shape,
         "rift_cell_size_m": model_resolution,
         "raw_rainfall_records": raw_rainfall_records,
         "rift_rainfall_records": rift_rainfall_records,

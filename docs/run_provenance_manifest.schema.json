@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:riftprep:schema:run-provenance:v1",
+  "title": "RIFT Input Builder run provenance manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "run",
+    "configuration",
+    "environment",
+    "directory_contract",
+    "acquisition",
+    "artifacts",
+    "stages",
+    "fallbacks",
+    "warnings",
+    "quality_control",
+    "failure",
+    "missing_metadata"
+  ],
+  "properties": {
+    "schema": {"const": "riftprep-run-provenance-v1"},
+    "run": {
+      "type": "object",
+      "required": [
+        "id", "case_name", "status", "phase", "started_utc", "completed_utc",
+        "cache_mode", "resumed", "resumed_from_run_id"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "case_name": {"type": "string", "minLength": 1},
+        "status": {"enum": ["running", "raw_complete", "complete", "failed"]},
+        "phase": {"type": "string"},
+        "started_utc": {"type": "string"},
+        "completed_utc": {"type": ["string", "null"]},
+        "cache_mode": {"enum": ["fresh", "reuse"]},
+        "resumed": {"type": "boolean"},
+        "resumed_from_run_id": {"type": ["string", "null"]}
+      }
+    },
+    "configuration": {"type": "object"},
+    "environment": {"type": "object"},
+    "directory_contract": {"type": "object"},
+    "acquisition": {"type": "object"},
+    "artifacts": {
+      "type": "object",
+      "required": ["raw", "processed", "simulation_ready", "root_outputs"],
+      "properties": {
+        "raw": {"type": "array"},
+        "processed": {"type": "array"},
+        "simulation_ready": {"type": "array"},
+        "root_outputs": {"type": "array"}
+      }
+    },
+    "stages": {"type": "array"},
+    "fallbacks": {"type": "array"},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "quality_control": {"type": "object"},
+    "failure": {"type": ["object", "null"]},
+    "missing_metadata": {"type": "array", "items": {"type": "string"}}
+  }
+}

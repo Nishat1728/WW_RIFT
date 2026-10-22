@@ -225,6 +225,64 @@ def _outlet_gdf(spec: OutletSpec, target_crs: str) -> gpd.GeoDataFrame:
     return data.to_crs(target_crs)
 
 
+def _nearest_valid_dem_value(
+    dem: np.ndarray,
+    node_mask: np.ndarray,
+    grid: GridSpec,
+    point: Point,
+) -> float:
+    """Return the nearest finite active DEM value without full-grid coordinates."""
+    candidate = node_mask & np.isfinite(dem)
+    if not candidate.any():
+        raise ValueError("Cannot terrain-match an outlet without active DEM values.")
+
+    nrows, ncols = dem.shape
+    row0 = int(np.clip(np.rint((grid.ymax - point.y) / grid.resolution), 0, nrows - 1))
+    col0 = int(np.clip(np.rint((point.x - grid.xmin) / grid.resolution), 0, ncols - 1))
+    if candidate[row0, col0]:
+        return float(dem[row0, col0])
+
+    # The automatic outlet resolver normally lands on an active node.  This
+    # bounded fallback handles an explicit point that falls just outside the
+    # active mask without allocating arrays for the entire HUC2 grid.
+    for radius in (1, 2, 4, 8, 16, 32, 64, 128):
+        r0, r1 = max(0, row0 - radius), min(nrows, row0 + radius + 1)
+        c0, c1 = max(0, col0 - radius), min(ncols, col0 + radius + 1)
+        local = candidate[r0:r1, c0:c1]
+        if not local.any():
+            continue
+        rows, cols = np.where(local)
+        rows = rows + r0
+        cols = cols + c0
+        dx = grid.xmin + cols * grid.resolution - point.x
+        dy = grid.ymax - rows * grid.resolution - point.y
+        index = int(np.argmin(dx * dx + dy * dy))
+        return float(dem[rows[index], cols[index]])
+
+    # Rare fallback for a point far outside a highly fragmented mask.  Work in
+    # row blocks so memory scales with the block, not with the whole grid.
+    x = grid.xmin + np.arange(ncols, dtype=float) * grid.resolution
+    best_distance = np.inf
+    best_value: float | None = None
+    for start in range(0, nrows, 512):
+        stop = min(start + 512, nrows)
+        block = candidate[start:stop]
+        if not block.any():
+            continue
+        rows, cols = np.where(block)
+        rows = rows + start
+        dx = x[cols] - point.x
+        dy = grid.ymax - rows * grid.resolution - point.y
+        distances = dx * dx + dy * dy
+        index = int(np.argmin(distances))
+        if float(distances[index]) < best_distance:
+            best_distance = float(distances[index])
+            best_value = float(dem[rows[index], cols[index]])
+    if best_value is None:
+        raise ValueError("Cannot terrain-match an outlet without active DEM values.")
+    return best_value
+
+
 def carve_outlets(
     walled_dem: np.ndarray,
     original_dem: np.ndarray,
@@ -237,14 +295,18 @@ def carve_outlets(
     outlets = _outlet_gdf(spec, grid.crs)
     result = walled_dem.astype(float, copy=True)
     carved = np.zeros_like(node_mask, dtype=bool)
-    xs = grid.xmin + np.arange(grid.nx + 1) * grid.resolution
-    ys = grid.ymax - np.arange(grid.ny + 1) * grid.resolution
-    xx, yy = np.meshgrid(xs, ys)
-    domain_box = box(grid.xmin, grid.ymin, grid.xmax, grid.ymax)
 
     for _, feature in outlets.iterrows():
         point = feature.geometry.centroid
         width = float(feature.get("width_m", spec.default_width_m))
+        feature_cut_elevation = feature.get("cut_elevation_m", spec.cut_elevation_m)
+        try:
+            feature_cut_elevation = float(feature_cut_elevation)
+        except (TypeError, ValueError):
+            feature_cut_elevation = spec.cut_elevation_m
+        if not np.isfinite(feature_cut_elevation):
+            feature_cut_elevation = spec.cut_elevation_m
+        feature_cut_elevation = float(feature_cut_elevation)
         target = point
         if spec.method == "open_corridor":
             candidates = [
@@ -254,6 +316,9 @@ def carve_outlets(
             edge = min(candidates, key=point.distance)
             target = LineString([point, edge]).buffer(max(width / 2, grid.resolution / 2), cap_style=2)
         else:
+            # A wall notch has no domain-edge endpoint.  Keep the outlet point
+            # as the reference endpoint for the optional sloped elevation mode.
+            edge = point
             target = point.buffer(max(width / 2, grid.resolution / 2))
         cut = rasterize(
             [(target, 1)], out_shape=grid.node_shape,
@@ -262,21 +327,25 @@ def carve_outlets(
         cut &= np.isclose(result, wall_elevation_m)
         if not cut.any():
             raise ValueError(f"Outlet at ({point.x:.2f}, {point.y:.2f}) does not intersect the wall.")
-        if spec.elevation_mode == "zero":
-            values = np.full(result.shape, spec.cut_elevation_m)
+        if spec.elevation_mode in {"zero", "constant"}:
+            # Assign only the rasterized corridor cells.  ``zero`` retains the
+            # historical cut_elevation_m default of 0 m while allowing an
+            # explicit value when requested.
+            result[cut] = feature_cut_elevation
+        elif spec.elevation_mode == "terrain_matched":
+            terrain = _nearest_valid_dem_value(original_dem, node_mask, grid, point)
+            result[cut] = terrain
+        elif spec.elevation_mode == "sloped":
+            terrain = _nearest_valid_dem_value(original_dem, node_mask, grid, point)
+            rows, cols = np.where(cut)
+            x = grid.xmin + cols * grid.resolution
+            y = grid.ymax - rows * grid.resolution
+            distance = np.sqrt((x - point.x) ** 2 + (y - point.y) ** 2)
+            edge_z = feature_cut_elevation
+            length = max(point.distance(edge), grid.resolution)
+            result[cut] = terrain + np.clip(distance / length, 0, 1) * (edge_z - terrain)
         else:
-            distance2 = (xx - point.x) ** 2 + (yy - point.y) ** 2
-            candidate = node_mask & np.isfinite(original_dem)
-            nearest = np.argmin(np.where(candidate, distance2, np.inf))
-            terrain = float(original_dem.flat[nearest])
-            if spec.elevation_mode in ("constant", "terrain_matched"):
-                values = np.full(result.shape, spec.cut_elevation_m if spec.elevation_mode == "constant" else terrain)
-            else:
-                edge_z = spec.cut_elevation_m
-                length = max(point.distance(edge), grid.resolution)
-                along = np.sqrt((xx - point.x) ** 2 + (yy - point.y) ** 2) / length
-                values = terrain + np.clip(along, 0, 1) * (edge_z - terrain)
-        result[cut] = values[cut]
+            raise ValueError(f"Unsupported outlet elevation mode: {spec.elevation_mode}")
         carved |= cut
     return result, outlets, carved
 

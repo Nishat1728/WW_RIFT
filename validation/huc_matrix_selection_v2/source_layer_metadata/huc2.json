@@ -1,0 +1,80 @@
+{
+  "level": 2,
+  "layer_id": 1,
+  "layer_url": "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/FeatureServer/1",
+  "layer_name": "2-digit HU (Region)",
+  "service_current_version": 11.3,
+  "service_last_edit_date_epoch_ms": null,
+  "object_id_field": "objectid",
+  "max_record_count": 2000,
+  "supports_pagination": true,
+  "supports_order_by": true,
+  "count_before": 22,
+  "count_after": 22,
+  "ids_before": 22,
+  "ids_after": 22,
+  "unique_paged_object_ids": 22,
+  "page_count": 1,
+  "page_lengths": [
+    22
+  ],
+  "pagination_complete_and_stable": true,
+  "schema_fields": [
+    "objectid",
+    "tnmid",
+    "metasourceid",
+    "sourcedatadesc",
+    "sourceoriginator",
+    "sourcefeatureid",
+    "loaddate",
+    "referencegnis_ids",
+    "areaacres",
+    "areasqkm",
+    "states",
+    "huc2",
+    "name",
+    "globalid",
+    "Shape__Length",
+    "Shape__Area"
+  ],
+  "requested_fields": [
+    "tnmid",
+    "loaddate",
+    "areasqkm",
+    "states",
+    "name",
+    "hutype",
+    "tohuc"
+  ],
+  "queried_fields": [
+    "objectid",
+    "huc2",
+    "tnmid",
+    "loaddate",
+    "areasqkm",
+    "states",
+    "name"
+  ],
+  "unavailable_optional_fields": [
+    "hutype",
+    "tohuc"
+  ],
+  "hu_type_rule_applicable": false,
+  "query": {
+    "where": "1=1",
+    "outFields": [
+      "objectid",
+      "huc2",
+      "tnmid",
+      "loaddate",
+      "areasqkm",
+      "states",
+      "name"
+    ],
+    "returnGeometry": false,
+    "orderByFields": "huc2 ASC,objectid ASC",
+    "page_size": 2000
+  },
+  "attribute_rows_canonical_sha256": "c0e35eca7438ae004af54c004f8ad1d476591ff29e619864d728f02fe58c89ff",
+  "metadata_sha256": "3d277539457cf4fd6512006f576f9378f85efc09896cb1b8115b0a990a5cf130"
+}

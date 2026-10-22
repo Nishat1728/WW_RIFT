@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 
@@ -59,8 +60,16 @@ from riftprep import (
     RIFTInputBuilder, build_rift_inputs,
 )
 from riftprep.notebook_frontend import (
-    build_case_from_widget_values, snapshot_widget_values,
+    build_case_from_widget_values, simulation_duration_seconds, snapshot_widget_values,
 )
+
+REPOSITORY_ROOT = next((
+    folder for folder in (Path.cwd(), *Path.cwd().parents)
+    if (folder / "pyproject.toml").is_file() and (folder / "riftprep").is_dir()
+), None)
+if REPOSITORY_ROOT is None:
+    raise RuntimeError("Extract/clone the complete repository before opening this notebook.")
+os.chdir(REPOSITORY_ROOT)
 
 plt.rcParams["figure.figsize"] = (8, 6)
 pd.options.display.max_colwidth = 120
@@ -131,6 +140,17 @@ def download_and_show(name):
     product = builder.download(name)
     qc = builder.qc_result(name)
     display(Markdown(f"### ✅ {name}: `{qc.status}` — `{product.provider}`"))
+    if (
+        name == "hydrography"
+        and product.metadata.get("empty_domain_confirmed")
+        and int(product.metadata.get("features", -1)) == 0
+    ):
+        display(Markdown(
+            "**No hydrography features were returned for the selected domain.** "
+            "The provider confirmed an empty result; the raw empty vector is preserved "
+            "and the workflow will skip automatic outlet carving. Provide coordinate "
+            "outlets if your simulation requires an explicit outlet."
+        ))
     display(pd.DataFrame(qc.checks))
     display(pd.DataFrame([
         {"artifact": key, "path": str(path), "bytes": path.stat().st_size}
@@ -235,15 +255,16 @@ display(widget_box(
 
 ## ✏️ USER EDIT
 
-Choose USGS 3DEP 10/30 m, public Copernicus GLO-30, or a local raster. Every source tile is saved
-before mosaicking or reprojection. Copernicus elevations retain their native vertical reference;
-the provenance report identifies the product so datum compatibility can be reviewed."""),
+Choose USGS 3DEP 10/30 m, public Copernicus GLO-30, or a local raster. The returned 3DEP service
+dataset, unchanged Copernicus COG tiles, or a byte-preserved local copy is saved under `raw/`
+before riftprep converts, mosaics, or aligns it. Derived DEMs are written under `processed/`;
+Copernicus elevations retain their provider vertical reference for datum review."""),
     code('''show_source_options("Terrain DEM and coastal topobathymetry")
 
 DEM_SOURCE_WIDGET = widgets.Dropdown(
-    options=[("USGS 3DEP — native 30 m", "3dep_30"),
-             ("USGS 3DEP — native 10 m", "3dep_10"),
-             ("Copernicus DEM GLO-30 — native 30 m", "copernicus_glo30"),
+    options=[("USGS 3DEP service product — 30 m", "3dep_30"),
+             ("USGS 3DEP service product — 10 m", "3dep_10"),
+             ("Copernicus DEM GLO-30 — 30 m COG tiles", "copernicus_glo30"),
              ("Local raster", "local")],
     value="3dep_30", description="DEM source", style=WIDGET_STYLE,
 )
@@ -456,7 +477,12 @@ The provider responses are retained unchanged. AORC and MRMS provide hourly accu
 ERA5-Land cumulative fields are de-accumulated; Daymet daily totals require the visible, explicit
 24-hour distribution assumption. With `uncovered_policy` set to `zero`, RIFT receives the source
 forcing wherever it exists and zero precipitation only outside coverage. Coverage evidence is
-still mapped in gray/black."""),
+still mapped in gray/black.
+
+The simulation duration automatically equals **End UTC minus Start UTC** whenever rainfall is
+enabled. Enter ISO timestamps with a timezone (`Z` means UTC). The preview updates as you edit;
+the manager-build cell validates and saves the duration. For a simulation without rainfall,
+disable rainfall and enter the separate duration in hours."""),
     code('''show_source_options("Rainfall and meteorological forcing")
 
 RAIN_ENABLED_WIDGET = widgets.Checkbox(value=True, description="Enable rainfall", indent=False)
@@ -478,6 +504,37 @@ RAIN_POLICY_WIDGET = widgets.Dropdown(
     value="zero", description="Uncovered-cell policy", style=WIDGET_STYLE,
 )
 RAIN_ATTEMPTS_WIDGET = widgets.IntText(value=8, description="Download attempts", style=WIDGET_STYLE)
+SIMULATION_DURATION_HOURS_WIDGET = widgets.FloatText(
+    value=24.0, description="Duration without rain (h)", style=WIDGET_STYLE,
+)
+SIMULATION_DURATION_PREVIEW = widgets.HTML()
+
+
+def update_simulation_duration(change=None):
+    SIMULATION_DURATION_HOURS_WIDGET.disabled = RAIN_ENABLED_WIDGET.value
+    try:
+        seconds = simulation_duration_seconds({
+            "rain_enabled": RAIN_ENABLED_WIDGET.value,
+            "rain_start": RAIN_START_WIDGET.value,
+            "rain_end": RAIN_END_WIDGET.value,
+            "simulation_duration_hours": SIMULATION_DURATION_HOURS_WIDGET.value,
+        })
+        SIMULATION_DURATION_PREVIEW.value = (
+            f"<b>Simulation duration:</b> {seconds / 3600:g} hours ({seconds:g} seconds). "
+            "Simulation time starts at 0; rebuild the managers after changing settings."
+        )
+    except ValueError:
+        SIMULATION_DURATION_PREVIEW.value = (
+            "<b>Check the event times:</b> use timezone-aware ISO timestamps, with end "
+            "after start; without rainfall, enter a positive duration."
+        )
+
+
+for control in (RAIN_ENABLED_WIDGET, RAIN_START_WIDGET, RAIN_END_WIDGET,
+                SIMULATION_DURATION_HOURS_WIDGET):
+    control.observe(update_simulation_duration, names="value")
+update_simulation_duration()
+
 DAYMET_DISTRIBUTION_WIDGET = widgets.Dropdown(
     options=[("Uniformly distribute each daily total over 24 UTC hours", "uniform_24h")],
     value="uniform_24h", description="Daymet time assumption", style=WIDGET_STYLE,
@@ -500,6 +557,7 @@ MRMS_REGION_WIDGET = widgets.Dropdown(
 display(widget_box(
     RAIN_ENABLED_WIDGET, RAIN_SOURCE_WIDGET, RAIN_LOCAL_PATH_WIDGET,
     RAIN_START_WIDGET, RAIN_END_WIDGET, RAIN_VARIABLE_WIDGET,
+    SIMULATION_DURATION_HOURS_WIDGET, SIMULATION_DURATION_PREVIEW,
     RAIN_POLICY_WIDGET, RAIN_ATTEMPTS_WIDGET,
     DAYMET_DISTRIBUTION_WIDGET, DAYMET_REGION_WIDGET,
     MRMS_PRODUCT_WIDGET, MRMS_REGION_WIDGET,
@@ -510,12 +568,32 @@ display(widget_box(
     ),
 ))'''),
 
-    markdown("""## 8 — Optional inflow, coastal-stage, and drainage inputs
+    markdown("""## 8 — Optional inflow, coastal-stage, drainage, and outlet inputs
 
 ## ✏️ USER EDIT
 
 Enable only the modules needed by the simulation and provide their explicit stations, controls,
-or local files. Disabled managers are shown but are not called."""),
+or local files. Disabled managers are shown but are not called.
+
+### Outlet choices
+
+The outlet control is deliberately explicit:
+
+- **Automatic lowest hydrography crossing** selects the lowest valid hydrography crossing of the
+  study-area boundary. If the provider confirms that the domain has no hydrography, the notebook
+  records that result and skips carving instead of inventing a river.
+- **Outlet point/vector file** accepts a point Shapefile or GeoPackage. The file must contain a
+  declared CRS; an optional `width_m` attribute can set the opening width for each point.
+- **Explicit coordinates** accepts a JSON list such as
+  `[{"x": 653939.5, "y": 1584239.8, "width_m": 120, "cut_elevation_m": 0}]`. The `x` and
+  `y` values are in the CRS entered below (for example `EPSG:5070`); multiple objects create
+  multiple outlets. `width_m` and `cut_elevation_m` are optional per-outlet overrides.
+- **No outlet** leaves the closed wall unchanged.
+
+Choose **Match terrain** to use the nearest valid active DEM elevation at each outlet, or choose
+**Constant**, **Zero**, or **Sloped** to use the visible cut-elevation value. The optimized carving
+routine rasterizes only the outlet-to-domain-edge corridor (or the local wall notch), so it does
+not create full-domain coordinate or distance arrays."""),
     code('''show_source_options("River inflow hydrographs")
 show_source_options("Coastal water level and surge")
 show_source_options("Urban drainage and hydraulic controls")
@@ -565,12 +643,17 @@ DRAINAGE_CONTROLS_WIDGET = widgets.Textarea(
 
 OUTLET_SOURCE_WIDGET = widgets.Dropdown(
     options=[("Automatic lowest hydrography crossing", "auto_hydrography_lowest"),
+             ("Outlet point/vector file", "vector"),
              ("Explicit coordinates", "coordinates"), ("No outlet", "none")],
     value="auto_hydrography_lowest", description="Outlet rule", style=WIDGET_STYLE,
 )
+OUTLET_VECTOR_PATH_WIDGET = widgets.Text(
+    value="", description="Outlet vector path", style=WIDGET_STYLE,
+    placeholder="Point shapefile/GeoPackage with a declared CRS",
+)
 OUTLET_COORDINATES_WIDGET = widgets.Textarea(
     value="[]", description="Outlet coordinates (JSON)", style=WIDGET_STYLE,
-    placeholder='[{"x": 12345, "y": 67890, "width_m": 120}]',
+    placeholder='[{"x": 12345, "y": 67890, "width_m": 120, "cut_elevation_m": 0}]',
     layout=widgets.Layout(width="100%", height="80px"),
 )
 OUTLET_CRS_WIDGET = widgets.Text(value="", description="Outlet coordinate CRS", style=WIDGET_STYLE)
@@ -598,6 +681,7 @@ display(widget_box(
     DRAINAGE_SOURCE_WIDGET, DRAINAGE_LOCAL_PATH_WIDGET,
     DRAINAGE_THRESHOLD_WIDGET, DRAINAGE_CONTROLS_WIDGET,
     widgets.HTML("<b>Outlet</b>"), OUTLET_SOURCE_WIDGET,
+    OUTLET_VECTOR_PATH_WIDGET,
     OUTLET_COORDINATES_WIDGET, OUTLET_CRS_WIDGET,
     OUTLET_METHOD_WIDGET, OUTLET_ELEVATION_WIDGET,
     OUTLET_CUT_ELEVATION_WIDGET, OUTLET_WIDTH_WIDGET,
@@ -620,7 +704,12 @@ display(Markdown(
     f"**Cache mode:** `{spec.cache.mode}`  \\\n"
     f"**Configuration override used:** `{override_used}`"
 ))
-display(builder.source_table())'''),
+display(builder.source_table())
+display(Markdown(
+    f"**Simulation duration:** "
+    f"{spec.simulation.end_time_s - spec.simulation.start_time_s:g} seconds "
+    f"({(spec.simulation.end_time_s - spec.simulation.start_time_s) / 3600:g} hours)"
+))'''),
 
     markdown("""## Domain manager: load and display the study area"""),
     code('''boundary = builder.load_domain()
@@ -631,7 +720,7 @@ ax.set(title=f"Selected study area — {spec.domain.mode}", xlabel="Easting (m)"
 plt.show()
 display(JSON(grid.as_dict()))'''),
 
-    markdown("""## DEM manager: download, save, checksum, and display the selected native DEM"""),
+    markdown("""## DEM manager: preserve, checksum, and display the selected source DEM"""),
     code('''raw_dem = download_and_show("dem")'''),
 
     markdown("""## Initial-state manager: save, checksum, and display the selected definition"""),
@@ -698,6 +787,10 @@ except Exception:
         image_path = builder.paths.quality_control / image_name
         if image_path.is_file():
             display(Image(filename=str(image_path)))
+    run_manifest_path = builder.paths.provenance / "run_manifest.json"
+    if run_manifest_path.is_file():
+        display(Markdown(f"### Failed-run provenance: `{run_manifest_path}`"))
+        display(JSON(json.loads(run_manifest_path.read_text())))
     raise
 else:
     display(Markdown(f"### ✅ RIFT build complete: `{result.case_root}`"))
@@ -708,12 +801,20 @@ else:
 qc = json.loads(result.qc_json_path.read_text())
 raw_inventory = json.loads(result.raw_catalog_path.read_text())
 input_status = pd.read_csv(result.case_root / "quality_control/input_status_summary.csv")
+run_provenance = json.loads(result.run_manifest_path.read_text())
 
 display(Markdown("## Final per-input status"))
 display(input_status)
 display(timings)
 display(JSON(qc))
 display(Markdown(f"**Checksummed raw artifacts:** {len(raw_inventory)}"))
+display(Markdown(f"**Run provenance:** `{result.run_manifest_path}`"))
+display(JSON({
+    "run": run_provenance["run"],
+    "fallbacks": run_provenance["fallbacks"],
+    "warnings": run_provenance["warnings"],
+    "missing_metadata": run_provenance["missing_metadata"],
+}))
 
 display(Markdown("## QC-approved products received by RIFT"))
 for figure in sorted((result.case_root / "figures").glob("processed_*.png")):
@@ -734,13 +835,24 @@ for figure_name in (
 
     markdown("""## Output contract
 
-- `raw/`: selected native provider products and case-local provider caches
-- `figures/raw_*`: the exact selected native products
-- `processed/`: explicitly transformed intermediate data
-- `rift_inputs/`: simulation-ready ESRI ASCII, HDF5, CSV, and boundary files
+- `raw/`: immutable provider responses/downloads, byte-preserved local sources, and provider caches
+- `figures/raw_*`: the selected source products before RIFT-grid processing
+- `processed/`: reproducible intermediate transformations not consumed directly by RIFT
+- `simulation_ready/`: quality-controlled ESRI ASCII, HDF5, CSV, and boundary files RIFT receives
 - `quality_control/provenance/`: source choices, sizes, and SHA-256 checksums
+- `quality_control/provenance/acquisition_events.*`: successful, reused, and failed acquisition attempts
+- `quality_control/provenance/run_manifest.json`: latest versioned success/failure/resume provenance
+- `quality_control/provenance/run_manifests/`: one history record per workflow attempt
 - `quality_control/timings/`: measured wall-clock time for every stage
 - `rift_case.cfg`, `RUN.md`, `case_manifest.json`: the runnable RIFT case
+
+For backward compatibility, a resumed case that already contains `rift_inputs/` continues to use
+that directory without migration. New cases always use `simulation_ready/`. The resolved choice is
+recorded in `quality_control/directory_contract.json`.
+
+Provider metadata, redacted query parameters, acquisition timestamps, embedded CRS status, and
+SHA-256 checksums are recorded for every raw artifact. Missing values are marked explicitly, and
+failed partial responses are inventoried without being treated as valid raw products.
 
 Always inspect the maps and quality-control reports before running the simulation."""),
 ]
@@ -757,3 +869,37 @@ notebook = {
 with OUTPUT.open("w", encoding="utf-8", newline="\n") as stream:
     stream.write(json.dumps(notebook, indent=1) + "\n")
 print(OUTPUT)
+
+# Keep the demonstration synchronized with the same front end and backend.
+demo = deepcopy(notebook)
+demo["cells"][0]["source"] = (
+    "# First run: HUC12 demonstration\n\n"
+    "This is the general RIFT Input Builder prefilled for HUC **180101080101**, with a "
+    "30 m USGS DEM, a 30 m RIFT grid, public U.S. sources, and fresh downloads. "
+    "The event is 2023-06-10 00:00 UTC to 2023-06-12 00:00 UTC: "
+    "the simulation duration must therefore be **48 hours (172800 seconds)**.\n\n"
+    "No manual land or soil replacements are preselected. Review any diagnostic map if "
+    "a provider product changes. Optional bathymetry, inflows, coastal stage, and drainage "
+    "are disabled. The automatic terrain-matched outlet is an illustrative boundary choice; "
+    "review it before scientific use.\n\n"
+    "Run the cells from top to bottom. All defaults are ready for this demo; **Run All** "
+    "downloads everything again under `demo_cases/demo_huc12_180101080101/`. "
+    "For your own study, use `RIFT_Input_Builder.ipynb` and follow the README.\n"
+).splitlines(keepends=True)
+replacements = {
+    'value="my_rift_case"': 'value="demo_huc12_180101080101"',
+    'value="rift_cases"': 'value="demo_cases"',
+    'value="010802050801"': 'value="180101080101"',
+    'value="2023-06-11T00:00:00Z"': 'value="2023-06-12T00:00:00Z"',
+    'value=160, description="Plot DPI"': 'value=110, description="Plot DPI"',
+}
+for cell in demo["cells"]:
+    source = "".join(cell["source"])
+    for old, new in replacements.items():
+        source = source.replace(old, new)
+    cell["source"] = source.splitlines(keepends=True)
+demo_path = ROOT / "examples" / "HUC12_Demo.ipynb"
+demo_path.parent.mkdir(exist_ok=True)
+with demo_path.open("w", encoding="utf-8", newline="\n") as stream:
+    stream.write(json.dumps(demo, indent=1) + "\n")
+print(demo_path)

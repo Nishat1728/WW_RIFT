@@ -1,0 +1,92 @@
+{
+  "level": 10,
+  "layer_id": 5,
+  "layer_url": "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/FeatureServer/5",
+  "layer_name": "10-digit HU (Watershed)",
+  "service_current_version": 11.3,
+  "service_last_edit_date_epoch_ms": null,
+  "object_id_field": "objectid",
+  "max_record_count": 2000,
+  "supports_pagination": true,
+  "supports_order_by": true,
+  "count_before": 18911,
+  "count_after": 18911,
+  "ids_before": 18911,
+  "ids_after": 18911,
+  "unique_paged_object_ids": 18911,
+  "page_count": 10,
+  "page_lengths": [
+    2000,
+    2000,
+    2000,
+    2000,
+    2000,
+    2000,
+    2000,
+    2000,
+    2000,
+    911
+  ],
+  "pagination_complete_and_stable": true,
+  "schema_fields": [
+    "objectid",
+    "tnmid",
+    "metasourceid",
+    "sourcedatadesc",
+    "sourceoriginator",
+    "sourcefeatureid",
+    "loaddate",
+    "referencegnis_ids",
+    "areaacres",
+    "areasqkm",
+    "states",
+    "huc10",
+    "name",
+    "hutype",
+    "humod",
+    "globalid",
+    "Shape__Length",
+    "Shape__Area"
+  ],
+  "requested_fields": [
+    "tnmid",
+    "loaddate",
+    "areasqkm",
+    "states",
+    "name",
+    "hutype",
+    "tohuc"
+  ],
+  "queried_fields": [
+    "objectid",
+    "huc10",
+    "tnmid",
+    "loaddate",
+    "areasqkm",
+    "states",
+    "name",
+    "hutype"
+  ],
+  "unavailable_optional_fields": [
+    "tohuc"
+  ],
+  "hu_type_rule_applicable": true,
+  "query": {
+    "where": "1=1",
+    "outFields": [
+      "objectid",
+      "huc10",
+      "tnmid",
+      "loaddate",
+      "areasqkm",
+      "states",
+      "name",
+      "hutype"
+    ],
+    "returnGeometry": false,
+    "orderByFields": "huc10 ASC,objectid ASC",
+    "page_size": 2000
+  },
+  "attribute_rows_canonical_sha256": "bdedd45f35678be225a42288d06e02fde3fb069752b4ad3abc7c67edce12cb5b",
+  "metadata_sha256": "cf3474a5f455f1a66dec6e2d55b52644700dad6a75bc3ab7b05147115a5fe099"
+}

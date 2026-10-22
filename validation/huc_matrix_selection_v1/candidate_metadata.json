@@ -1,0 +1,143 @@
+{
+  "schema": "riftprep-conus-huc-selection-v1-candidates",
+  "eligibility_rules": {
+    "valid_code": "ASCII decimal digits with exact HUC level length",
+    "unique_code_within_level": true,
+    "states": {
+      "rule": "nonempty WBD states, all members in the 48 states or DC",
+      "allowed": [
+        "AL",
+        "AR",
+        "AZ",
+        "CA",
+        "CO",
+        "CT",
+        "DC",
+        "DE",
+        "FL",
+        "GA",
+        "IA",
+        "ID",
+        "IL",
+        "IN",
+        "KS",
+        "KY",
+        "LA",
+        "MA",
+        "MD",
+        "ME",
+        "MI",
+        "MN",
+        "MO",
+        "MS",
+        "MT",
+        "NC",
+        "ND",
+        "NE",
+        "NH",
+        "NJ",
+        "NM",
+        "NV",
+        "NY",
+        "OH",
+        "OK",
+        "OR",
+        "PA",
+        "RI",
+        "SC",
+        "SD",
+        "TN",
+        "TX",
+        "UT",
+        "VA",
+        "VT",
+        "WA",
+        "WI",
+        "WV",
+        "WY"
+      ]
+    },
+    "hu_type": {
+      "allowed": [
+        "C",
+        "M",
+        "S",
+        "U"
+      ],
+      "excluded_meanings": [
+        "Frontal",
+        "Island",
+        "Water",
+        "Indeterminate"
+      ],
+      "applies_to_levels": [
+        10,
+        12
+      ],
+      "unavailable_levels": [
+        4,
+        8
+      ],
+      "schema_limitation": "The authoritative WBD FeatureServer does not publish HUType for HUC4 or HUC8; no value is invented or derived."
+    },
+    "area_sqkm": "finite and > 0",
+    "authoritative_parent_prefix_required": true,
+    "nominal_30m_cell_ceiling": {
+      "4": 50000000,
+      "8": 15000000,
+      "10": 5000000,
+      "12": 2000000
+    },
+    "nominal_cell_area_sqkm": 0.0009
+  },
+  "source_counts": {
+    "4": 245,
+    "8": 2456,
+    "10": 18911,
+    "12": 103068
+  },
+  "eligible_counts": {
+    "4": 112,
+    "8": 1990,
+    "10": 14415,
+    "12": 80083
+  },
+  "exclusion_counts": {
+    "4": {
+      "exceeds_nominal_30m_cell_ceiling": 87,
+      "invalid_area": 1,
+      "missing_states": 1,
+      "not_entirely_conus": 70
+    },
+    "8": {
+      "exceeds_nominal_30m_cell_ceiling": 87,
+      "invalid_area": 11,
+      "missing_states": 1,
+      "not_entirely_conus": 454
+    },
+    "10": {
+      "exceeds_nominal_30m_cell_ceiling": 66,
+      "excluded_hu_type": 1272,
+      "missing_states": 25,
+      "not_entirely_conus": 3653
+    },
+    "12": {
+      "exceeds_nominal_30m_cell_ceiling": 145,
+      "excluded_hu_type": 3340,
+      "missing_states": 28,
+      "not_entirely_conus": 20486
+    }
+  },
+  "created_utc": "2026-10-12T03:45:44.081645+00:00",
+  "source_metadata_path": "source_metadata.json",
+  "source_metadata_sha256": "7c51682d672d0454f36ed8f4ad89cde9665ecede0eb0326493abc676995b5980",
+  "source_artifact_sha256": "17c765145cbf031111c3c3e07cd3be32409aeedaf2319f2fa07feb0dae6d3a4e",
+  "eligible_artifact": {
+    "path": "eligible_conus_hucs.jsonl.gz",
+    "records": 96600,
+    "bytes": 4854675,
+    "sha256": "3dab07c709444f26d3127052662837645072ba2a2fdb2da6b79d6779d7606dd4",
+    "canonical_jsonl_sha256": "71f0d2a52461417545592b519f2fd7d62f815400c776f9abfe7b728fa1de0a89",
+    "compression": "gzip-mtime-0"
+  }
+}

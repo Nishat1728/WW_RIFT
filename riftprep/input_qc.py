@@ -76,12 +76,26 @@ def _raster_checks(path: Path, prefix: str, rows: list[dict[str, Any]]) -> None:
         _check(rows, f"{prefix}: contains valid cells", valid > 0, valid)
 
 
-def _vector_checks(path: Path, prefix: str, rows: list[dict[str, Any]]) -> None:
+def _vector_checks(
+    path: Path,
+    prefix: str,
+    rows: list[dict[str, Any]],
+    *,
+    allow_confirmed_empty: bool = False,
+) -> None:
     data = gpd.read_file(path)
     _check(rows, f"{prefix}: readable vector", True, str(path))
     _check(rows, f"{prefix}: CRS declared", data.crs is not None, str(data.crs))
     usable = int(np.count_nonzero(data.geometry.notna() & ~data.geometry.is_empty))
-    _check(rows, f"{prefix}: usable geometries", usable > 0, usable)
+    if prefix == "hydrography" and usable == 0 and allow_confirmed_empty:
+        _check(
+            rows,
+            "hydrography: provider-confirmed empty domain",
+            True,
+            {"features": 0, "accepted": True},
+        )
+    else:
+        _check(rows, f"{prefix}: usable geometries", usable > 0, usable)
     if prefix == "hydrography":
         allowed = data.geometry.geom_type.isin(["LineString", "MultiLineString"])
         _check(rows, "hydrography: line geometries", bool(allowed.all()), data.geom_type.value_counts().to_dict())
@@ -127,7 +141,16 @@ def check_raw_product(
                 if key in scientific_files:
                     _raster_checks(scientific_files[key], key, rows)
         elif name == "hydrography":
-            _vector_checks(scientific_files["vector"], name, rows)
+            provider_empty = (
+                product.provider == "usgs_3dhp"
+                and bool(product.metadata.get("empty_domain_confirmed"))
+                and int(product.metadata.get("features", -1)) == 0
+                and int(product.metadata.get("tile_count", 0)) > 0
+            )
+            _vector_checks(
+                scientific_files["vector"], name, rows,
+                allow_confirmed_empty=provider_empty,
+            )
         elif name == "soil":
             if product.provider == "soilgrids":
                 for field_name in ("permeability", "porosity", "residual", "alpha"):

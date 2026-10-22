@@ -3,12 +3,34 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
 import yaml
 
 from .config import DomainSpec, OutletSpec, RiverBathymetrySpec, SimulationSpec
+
+
+def rainfall_period_seconds(options: Mapping[str, Any]) -> float:
+    """Return the elapsed UTC event duration, rejecting ambiguous timestamps."""
+    times = []
+    for key, label in (("start_utc", "Rainfall start"), ("end_utc", "Rainfall end")):
+        text = str(options.get(key, "")).strip()
+        try:
+            timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                f"{label} must be an ISO date/time with a timezone, "
+                "for example 2023-06-10T00:00:00Z."
+            ) from exc
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError(f"{label} must include a timezone (use Z for UTC).")
+        times.append(timestamp.astimezone(timezone.utc))
+    duration = (times[1] - times[0]).total_seconds()
+    if duration <= 0:
+        raise ValueError("Rainfall end must be later than rainfall start.")
+    return duration
 
 
 @dataclass(frozen=True)
@@ -111,7 +133,7 @@ def case_from_mapping(payload: Mapping[str, Any]) -> CaseSpec:
     if "bounds" in domain_payload and domain_payload["bounds"] is not None:
         domain_payload["bounds"] = tuple(domain_payload["bounds"])
     domain = DomainSpec(**domain_payload)
-    simulation = SimulationSpec(**dict(data.pop("simulation", {})))
+    simulation_payload = dict(data.pop("simulation", {}))
     cache = CachePolicy(**dict(data.pop("cache", {})))
     plots_payload = dict(data.pop("plots", {}))
     if "formats" in plots_payload:
@@ -144,6 +166,12 @@ def case_from_mapping(payload: Mapping[str, Any]) -> CaseSpec:
     products = {
         name: _product(data.pop(name, None), default) for name, default in defaults.items()
     }
+    if products["rainfall"].enabled and "end_time_s" not in simulation_payload:
+        simulation_payload["end_time_s"] = (
+            float(simulation_payload.get("start_time_s", 0))
+            + rainfall_period_seconds(products["rainfall"].options)
+        )
+    simulation = SimulationSpec(**simulation_payload)
     dem = _product(data.pop("dem", None), ProductSpec(provider="watershed_workflow_3dep"))
     if data:
         raise ValueError(f"Unknown configuration keys: {sorted(data)}")

@@ -5,6 +5,28 @@ from pathlib import Path
 from typing import Any, Literal
 
 
+SIMULATION_READY_DIRECTORY = "simulation_ready"
+LEGACY_SIMULATION_READY_DIRECTORY = "rift_inputs"
+
+
+def resolve_simulation_ready_directory(root: str | Path) -> Path:
+    """Return the final-input directory without migrating an existing case.
+
+    New cases use ``simulation_ready/``.  A case created by riftprep <= 0.3 may
+    already contain ``rift_inputs/``; when the canonical directory does not
+    exist, that legacy directory remains the owner so cache-preserving resumes
+    do not move, duplicate, or overwrite completed products.
+    """
+    root = Path(root).expanduser().resolve()
+    canonical = root / SIMULATION_READY_DIRECTORY
+    legacy = root / LEGACY_SIMULATION_READY_DIRECTORY
+    if canonical.exists():
+        return canonical
+    if legacy.exists():
+        return legacy
+    return canonical
+
+
 @dataclass(frozen=True)
 class DomainSpec:
     mode: Literal["huc", "shapefile", "rectangle"] = "huc"
@@ -128,22 +150,55 @@ class ProjectPaths:
     raw: Path
     provider_cache: Path
     processed: Path
-    inputs: Path
+    simulation_ready: Path
     figures: Path
     quality_control: Path
     provenance: Path
     timings: Path
     results: Path
 
+    @property
+    def inputs(self) -> Path:
+        """Backward-compatible alias for the final RIFT input directory."""
+        return self.simulation_ready
+
+    @property
+    def uses_legacy_input_directory(self) -> bool:
+        return self.simulation_ready.name == LEGACY_SIMULATION_READY_DIRECTORY
+
+    def directory_contract(self) -> dict[str, Any]:
+        """Describe the exclusive ownership of the three data areas."""
+        return {
+            "schema": "riftprep-directory-contract-v1",
+            "raw": {
+                "path": self.raw.relative_to(self.root).as_posix(),
+                "owner": (
+                    "immutable provider responses, provider-native downloads, "
+                    "byte-preserved local source copies, and provider cache"
+                ),
+                "mutable_by_processing": False,
+            },
+            "processed": {
+                "path": self.processed.relative_to(self.root).as_posix(),
+                "owner": "reproducible intermediate transformations not consumed directly by RIFT",
+            },
+            "simulation_ready": {
+                "path": self.simulation_ready.relative_to(self.root).as_posix(),
+                "owner": "quality-controlled files consumed directly by RIFT",
+                "legacy_directory_in_use": self.uses_legacy_input_directory,
+            },
+        }
+
     @classmethod
     def create(cls, root: str | Path) -> "ProjectPaths":
         root = Path(root).expanduser().resolve()
+        simulation_ready = resolve_simulation_ready_directory(root)
         paths = cls(
             root=root,
             raw=root / "raw",
             provider_cache=root / "raw" / "provider_cache",
             processed=root / "processed",
-            inputs=root / "rift_inputs",
+            simulation_ready=simulation_ready,
             figures=root / "figures",
             quality_control=root / "quality_control",
             provenance=root / "quality_control" / "provenance",
