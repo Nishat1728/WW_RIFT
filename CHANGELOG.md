@@ -4,6 +4,15 @@ All notable changes to this project are documented here. Versions follow semanti
 
 ## Unreleased
 
+- Added independent spin-up/transient UTC windows, output cadences and hotstart controls
+  (hotstart ON by default), with a four-calendar-month rain-free spin-up and daily outputs.
+- Added fresh USGS daily-mean discharge histories (20 years by default), selectable low-flow
+  quantiles, coverage/zero/invalid-day evidence, and explicitly disclosed manual constants.
+- Added two CFGs and a fail-closed stage runner with completion checks, latest-snapshot selection,
+  cell-to-node depth-only handoff, age disclosure and zero-clock event alignment. This does not
+  transfer full soil, momentum or urban storage state.
+- Reorganized the README into an overview with installation/examples/testing links, preserving
+  the complete beginner guide and adding detailed two-stage scientific/operational guidance.
 - Added a beginner walkthrough covering installation, widgets, sources, credentials, quality
   gates, fresh/reuse behavior, output files, and the separate RIFT simulation step.
 - Matched notebook simulation duration to the selected rainfall period, with a visible preview,

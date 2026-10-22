@@ -10,6 +10,7 @@ from typing import Any, Literal, Mapping
 import yaml
 
 from .config import DomainSpec, OutletSpec, RiverBathymetrySpec, SimulationSpec
+from .spinup import SpinupSpec, utc_time
 
 
 def rainfall_period_seconds(options: Mapping[str, Any]) -> float:
@@ -98,6 +99,7 @@ class CaseSpec:
     cache: CachePolicy = field(default_factory=CachePolicy)
     plots: PlotPolicy = field(default_factory=PlotPolicy)
     simulation: SimulationSpec = field(default_factory=SimulationSpec)
+    spinup: SpinupSpec = field(default_factory=SpinupSpec)
 
     def __post_init__(self) -> None:
         if not self.case_name or any(c in self.case_name for c in "\\/:*?\"<>|"):
@@ -111,6 +113,35 @@ class CaseSpec:
         ):
             if product.enabled and not {"start_utc", "end_utc"}.issubset(product.options):
                 raise ValueError(f"{name} needs start_utc and end_utc.")
+        if self.simulation.start_utc or self.simulation.end_utc:
+            start = utc_time(self.simulation.start_utc)
+            end = utc_time(self.simulation.end_utc)
+            if (end - start).total_seconds() != self.simulation.end_time_s - self.simulation.start_time_s:
+                raise ValueError("Transient UTC window must match its elapsed simulation duration.")
+            for name in ("rainfall", "inflows", "coastal"):
+                product = getattr(self, name)
+                if product.enabled and (
+                    utc_time(product.options["start_utc"]) != start
+                    or utc_time(product.options["end_utc"]) != end
+                ):
+                    raise ValueError(f"{name} window must equal the transient UTC window.")
+        if self.spinup.enabled:
+            self.spinup.validate()
+            if self.simulation.start_time_s != 0:
+                raise ValueError("Two-stage runs require a zero-based transient solver clock.")
+            if not self.simulation.start_utc:
+                raise ValueError("Spin-up requires simulation.start_utc and simulation.end_utc.")
+            if utc_time(self.spinup.end_utc) != utc_time(self.simulation.start_utc):
+                raise ValueError("Spin-up end must equal transient start; gaps/overlaps are not implicit.")
+            if self.spinup.output_directory == self.simulation.output_directory:
+                raise ValueError("Spin-up and transient output directories must differ.")
+
+    @property
+    def spinup_baseflow(self) -> ProductSpec:
+        return ProductSpec(
+            enabled=self.spinup.enabled, provider=self.spinup.provider,
+            options=self.spinup.download_options(),
+        )
 
     @property
     def case_root(self) -> Path:
@@ -134,6 +165,7 @@ def case_from_mapping(payload: Mapping[str, Any]) -> CaseSpec:
         domain_payload["bounds"] = tuple(domain_payload["bounds"])
     domain = DomainSpec(**domain_payload)
     simulation_payload = dict(data.pop("simulation", {}))
+    spinup_payload = dict(data.pop("spinup", {}))
     cache = CachePolicy(**dict(data.pop("cache", {})))
     plots_payload = dict(data.pop("plots", {}))
     if "formats" in plots_payload:
@@ -171,6 +203,12 @@ def case_from_mapping(payload: Mapping[str, Any]) -> CaseSpec:
             float(simulation_payload.get("start_time_s", 0))
             + rainfall_period_seconds(products["rainfall"].options)
         )
+    if products["rainfall"].enabled and (
+        float(simulation_payload["end_time_s"]) - float(simulation_payload.get("start_time_s", 0))
+        == rainfall_period_seconds(products["rainfall"].options)
+    ):
+        for key in ("start_utc", "end_utc"):
+            simulation_payload.setdefault(key, products["rainfall"].options[key])
     simulation = SimulationSpec(**simulation_payload)
     dem = _product(data.pop("dem", None), ProductSpec(provider="watershed_workflow_3dep"))
     if data:
@@ -180,6 +218,7 @@ def case_from_mapping(payload: Mapping[str, Any]) -> CaseSpec:
         output_root=output_root,
         domain=domain,
         simulation=simulation,
+        spinup=SpinupSpec(**spinup_payload),
         cache=cache,
         plots=plots,
         outlets=outlets,

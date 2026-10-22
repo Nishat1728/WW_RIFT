@@ -78,7 +78,9 @@ def write_hydrograph_bundle(directory: str | Path, sources: Sequence[Mapping[str
         hydro_path = directory / f"{name}_si_m3s.csv"
         time_s = np.asarray(source["time_s"], float)
         discharge = np.asarray(source["discharge_m3_s"], float)
-        if time_s.size < 2 or not np.all(np.diff(time_s) > 0) or np.any(discharge < 0):
+        if (time_s.size < 2 or time_s.shape != discharge.shape
+                or not np.isfinite(time_s).all() or not np.isfinite(discharge).all()
+                or not np.all(np.diff(time_s) > 0) or np.any(discharge < 0)):
             raise ValueError(f"Invalid hydrograph: {name}")
         np.savetxt(hydro_path, np.column_stack([time_s, discharge]), delimiter=",", fmt="%.10g")
         rows.append({
@@ -137,7 +139,8 @@ def build_rift_config(
         "output.directory": simulation.output_directory,
         "output.depth_ascii": 1, "output.unit_discharge_ascii": 1,
         "output.water_surface_ascii": 1, "output.interval_s": simulation.output_interval_s,
-        "output.peak_maps": 1, "output.arrival_map": 1, "output.hotstart": 0,
+        "output.peak_maps": 1, "output.arrival_map": 1,
+        "output.hotstart": int(simulation.save_hotstart),
         "output.bathymetry_ascii": 1, "output.manning_ascii": 1,
         "diagnostics.mass_balance": 1,
     }
@@ -171,21 +174,25 @@ def write_run_instructions(
     output_directory: str = "results/native",
     spinup_cfg_path: str | None = None,
     spinup_output_directory: str = "results/spinup",
-    spinup_final_depth: str = "results/spinup/water_depth_0001.asc",
-    spinup_final_hotstart: str = "results/spinup/hotstart_0001.bin",
 ) -> Path:
     if spinup_cfg_path:
-        run_commands = f"""mkdir -p {spinup_output_directory} {output_directory}
-{executable} {spinup_cfg_path}
-test -s {spinup_final_depth}
-test -s {spinup_final_hotstart}
-{executable} {cfg_path}"""
-        sequence_note = f"""Run the four-month baseflow-only spin-up first. The event configuration then reads
-`{spinup_final_depth}` as its initial water-depth raster. This depth-raster handoff intentionally
-resets the transient clock to zero so rainfall, inflow, drainage, and surge files remain aligned
-with the event window; velocities are not transferred. The spin-up also writes
-`{spinup_final_hotstart}` for diagnostics. Do not use that hotstart directly unless the event
-configuration and every forcing timestamp are shifted to the spin-up clock."""
+        run_commands = f"riftprep simulate-stages . --executable /absolute/path/to/rift"
+        sequence_note = """Run from this case directory. `simulation_plan.json` records both calendar windows,
+cadences and hotstart choices. The command runs `rift_spinup.cfg` with NO rainfall and checked
+constant baseflow hydrographs, verifies completion, selects the latest saved depth from
+`snapshot_index.csv`, writes the transient initial-depth raster, then runs `rift_case.cfg`.
+It refuses nonempty result directories; it does not reuse an old simulation.
+
+The handoff is **water depth only**, not a full hydrologic-state restart. Velocity, soil moisture,
+cumulative infiltration and urban storage are not transferred. The latest saved state can be
+up to one output interval older than the spin-up end; its actual time and age are disclosed in
+`quality_control/spinup_handoff.json`. Solver cell depths are averaged onto DEM nodes with edge
+replication. Both solver clocks start at zero, keeping transient forcing aligned. Saved binary
+hotstarts are useful for same-clock restarts; do NOT attach the spin-up hotstart directly to a
+zero-clock event. Preparation alone does not run four months of simulation or prove equilibration.
+
+Daily saved output means `output.interval_s = 86400`, not daily rainfall. Hotstart defaults to ON
+for both phases and follows the same save cadence as other solver outputs."""
     else:
         run_commands = f"""mkdir -p {output_directory}
 {executable} {cfg_path}"""

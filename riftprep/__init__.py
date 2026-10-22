@@ -33,6 +33,7 @@ from .run_manifest import (
     validate_run_manifest,
 )
 from .managers import RawCatalog, RawProduct, acquire_all_raw
+from .spinup import SpinupSpec, calendar_shift, run_stages
 from .workflow import (
     CaseResult,
     RIFTInputBuilder,

@@ -14,10 +14,16 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .spec import CaseSpec, case_from_mapping, load_case, rainfall_period_seconds, save_case
+from .spinup import calendar_shift, utc_time
 
 
 def simulation_duration_seconds(values: Mapping[str, Any]) -> float:
     """Match rainfall when enabled; otherwise use the explicit dry-run duration."""
+    if not bool(values.get("transient_match_rainfall", True)):
+        return rainfall_period_seconds({
+            "start_utc": values.get("transient_start", "2023-06-10T00:00:00Z"),
+            "end_utc": values.get("transient_end", "2023-06-11T00:00:00Z"),
+        })
     if bool(values.get("rain_enabled", True)):
         return rainfall_period_seconds({
             "start_utc": values.get("rain_start", "2023-06-10T00:00:00Z"),
@@ -483,6 +489,25 @@ def case_payload_from_widget_values(values: Mapping[str, Any]) -> dict[str, Any]
             "default_width_m": _value(values, "outlet_width", 120.0),
         }
 
+    from datetime import timedelta
+    if bool(_value(values, "transient_match_rainfall", True)) and rainfall["enabled"]:
+        event_start = rainfall["options"]["start_utc"]
+        event_end = rainfall["options"]["end_utc"]
+    else:
+        event_start = str(_value(values, "transient_start", "2023-06-10T00:00:00Z"))
+        event_end = (utc_time(event_start) + timedelta(seconds=duration_seconds)).isoformat()
+    # Every event forcing shares one clock and exactly the selected event window.
+    # Manual event dates therefore become acquisition dates, not a truncated CFG.
+    for product in (rainfall, inflows, coastal):
+        if product["enabled"]:
+            product["options"].update(start_utc=event_start, end_utc=event_end)
+    spinup_enabled = bool(_value(values, "spinup_enabled", False))
+    automatic = bool(_value(values, "spinup_auto_window", True))
+    spinup_end = event_start if automatic else str(_value(values, "spinup_end", event_start))
+    spinup_start = (calendar_shift(spinup_end, months=-4) if automatic
+                    else str(_value(values, "spinup_start", "2023-02-10T00:00:00Z")))
+    spinup_stations = (inflow_stations if bool(_value(values, "spinup_use_inflow_stations", False))
+                      else _json_value(values, "spinup_stations", "Spin-up stations", list))
     return {
         "case_name": _required_text(values, "case_name", "Case name", "my_rift_case"),
         "output_root": _required_text(values, "output_root", "Output root", "rift_cases"),
@@ -508,7 +533,21 @@ def case_payload_from_widget_values(values: Mapping[str, Any]) -> dict[str, Any]
         "simulation": {
             "start_time_s": 0,
             "end_time_s": duration_seconds,
-            "output_interval_s": min(3600, duration_seconds),
+            "start_utc": event_start, "end_utc": event_end,
+            "output_interval_s": float(_value(values, "transient_output_hours", min(1, duration_seconds/3600))) * 3600,
+            "save_hotstart": bool(_value(values, "transient_save_hotstart", True)),
+            "output_directory": _value(values, "transient_output_directory", "results/transient"),
+        },
+        "spinup": {
+            "enabled": spinup_enabled, "start_utc": spinup_start, "end_utc": spinup_end,
+            "provider": _value(values, "spinup_source", "usgs_waterdata"),
+            "stations": spinup_stations,
+            "history_years": int(_value(values, "spinup_history_years", 20)),
+            "quantile": float(_value(values, "spinup_quantile", 0)),
+            "minimum_coverage": float(_value(values, "spinup_minimum_coverage", 0.9)),
+            "output_interval_s": float(_value(values, "spinup_output_hours", 24)) * 3600,
+            "save_hotstart": bool(_value(values, "spinup_save_hotstart", True)),
+            "output_directory": _value(values, "spinup_output_directory", "results/spinup"),
         },
     }
 

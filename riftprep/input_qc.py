@@ -200,7 +200,7 @@ def check_raw_product(
                     if len(times) > 1:
                         monotonic = monotonic and bool(np.all(np.diff(times) > np.timedelta64(0, "ns")))
                     _check(rows, "rainfall time is valid and increasing", monotonic, len(times))
-        elif name in {"inflows", "coastal"}:
+        elif name in {"inflows", "coastal", "spinup_baseflow"}:
             _check(
                 rows, f"{name}: stations explicitly selected",
                 bool(options.get("stations")), len(options.get("stations", [])),

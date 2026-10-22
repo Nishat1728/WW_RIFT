@@ -194,3 +194,40 @@ def test_huc12_demo_uses_public_sources_and_infers_48_hours():
         source = "".join(cell["source"])
         if cell["cell_type"] == "code" and not source.lstrip().startswith("%"):
             ast.parse(source, filename=f"demo-cell-{index}")
+
+
+@pytest.mark.parametrize("notebook_path", ["RIFT_Input_Builder.ipynb", "examples/HUC12_Demo.ipynb"])
+def test_real_widget_cells_execute_and_phase_callbacks_stay_synchronized(notebook_path, monkeypatch):
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.chdir(root)
+    notebook = json.loads((root / notebook_path).read_text(encoding="utf-8"))
+    namespace = {}
+    for cell in notebook["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        source = "".join(cell["source"])
+        if "widget_values = snapshot_widget_values" in source:
+            break  # No output creation, domain request or download in this test.
+        source = "\n".join(line for line in source.splitlines() if not line.startswith("%"))
+        exec(compile(source, notebook_path, "exec"), namespace)
+        namespace["display"] = lambda *args, **kwargs: None
+    namespace["RAIN_END_WIDGET"].value = "2024-07-01T00:00:00Z"
+    namespace["RAIN_START_WIDGET"].value = "2024-06-30T00:00:00Z"
+    assert namespace["TRANSIENT_START_WIDGET"].value == "2024-06-30T00:00:00Z"
+    assert namespace["SPINUP_START_WIDGET"].value.startswith("2024-02-29")
+    namespace["TRANSIENT_MATCH_RAINFALL_WIDGET"].value = False
+    namespace["TRANSIENT_END_WIDGET"].value = "2024-07-02T00:00:00Z"
+    assert "48 hours" in namespace["SIMULATION_DURATION_PREVIEW"].value
+    namespace["SPINUP_ENABLED_WIDGET"].value = True
+    namespace["SPINUP_STATIONS_WIDGET"].value = '[{"site":"01184000","id":"inlet"}]'
+    values = namespace["snapshot_widget_values"](namespace)
+    spec = case_from_mapping(case_payload_from_widget_values(values))
+    assert spec.spinup.enabled
+    assert spec.simulation.end_time_s == 172800
+    assert spec.spinup.end_utc == spec.simulation.start_utc
+    namespace["RAIN_ENABLED_WIDGET"].value = False
+    namespace["TRANSIENT_MATCH_RAINFALL_WIDGET"].value = True
+    namespace["SIMULATION_DURATION_HOURS_WIDGET"].value = 2
+    assert namespace["TRANSIENT_END_WIDGET"].disabled
+    assert namespace["TRANSIENT_END_WIDGET"].value.startswith("2024-06-30T02:00:00")
+    assert "2 hours" in namespace["SIMULATION_DURATION_PREVIEW"].value

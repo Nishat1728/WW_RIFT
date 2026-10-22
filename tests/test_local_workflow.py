@@ -7,6 +7,7 @@ import pandas as pd
 import rasterio
 import xarray as xr
 import yaml
+import pytest
 from rasterio.transform import from_origin
 from shapely.geometry import LineString, box
 
@@ -24,7 +25,8 @@ def _raster(path: Path, values: np.ndarray, dtype: str = "float32") -> Path:
     return path
 
 
-def test_complete_local_raw_first_workflow(tmp_path: Path):
+@pytest.mark.parametrize("two_stage", [False, True])
+def test_complete_local_raw_first_workflow(tmp_path: Path, two_stage):
     source = tmp_path / "source"
     shape = (4, 5)
     dem = _raster(source / "dem.tif", 50 + np.arange(20).reshape(shape) / 10)
@@ -82,6 +84,13 @@ def test_complete_local_raw_first_workflow(tmp_path: Path):
         "simulation": {"end_time_s": 10800},
     }
     config_path = tmp_path / "case.yaml"
+    if two_stage:
+        config["spinup"] = {
+            "enabled": True, "start_utc": "2023-02-10T00:00:00Z",
+            "end_utc": "2023-06-10T00:00:00Z", "provider": "manual_constant",
+            "stations": [{"id": "inlet", "constant_m3_s": 0.2,
+                          "support": {"x": 1_000_100, "y": 1_000_150, "crs": "EPSG:5070"}}],
+        }
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     builder = RIFTInputBuilder(config_path)
     builder.load_domain()
@@ -90,7 +99,7 @@ def test_complete_local_raw_first_workflow(tmp_path: Path):
     downloaded = builder.finish_raw_downloads()
     assert set(downloaded.catalog.products) == {
         "dem", "initial_state", "hydrography", "land_cover", "soil", "rainfall"
-    }
+    } | ({"spinup_baseflow"} if two_stage else set())
     assert downloaded.summary_path.is_file()
     assert not (downloaded.paths.simulation_ready / "dem.asc").exists()
     assert (downloaded.paths.raw / "dem" / dem.name).is_file()
@@ -108,6 +117,19 @@ def test_complete_local_raw_first_workflow(tmp_path: Path):
     config_text = (result.case_root / "rift_case.cfg").read_text(encoding="utf-8")
     assert "simulation_ready/dem.asc" in config_text
     assert "simulation_ready/rainfall_ats.h5" in config_text
+    if two_stage:
+        spinup_text = result.spinup_config_path.read_text()
+        assert "modules.rainfall = 0" in spinup_text
+        assert "rainfall_ats.h5" not in spinup_text
+        assert "modules.inflows = 1" in spinup_text
+        assert "output.interval_s = 86400" in spinup_text
+        assert "output.hotstart = 1" in spinup_text
+        assert "output.hotstart = 1" in config_text
+        assert "simulation_ready/spinup_water_depth.asc" in config_text
+        assert not (result.case_root / "simulation_ready/spinup_water_depth.asc").exists()
+        baseflow = json.loads((result.case_root / "quality_control/spinup_baseflow.json").read_text())
+        assert baseflow["stations"][0]["method"] == "explicit_user_constant"
+        assert "simulate-stages" in (result.case_root / "RUN.md").read_text()
     raw_catalog = result.raw_catalog_path.read_text(encoding="utf-8")
     assert '"product": "dem"' in raw_catalog
     assert '"product": "rainfall"' in raw_catalog
@@ -128,7 +150,7 @@ def test_complete_local_raw_first_workflow(tmp_path: Path):
     acquisition_events = json.loads(
         downloaded.acquisition_events_path.read_text(encoding="utf-8")
     )
-    assert len(acquisition_events) == 7  # Boundary plus six enabled inputs.
+    assert len(acquisition_events) == 7 + int(two_stage)  # Boundary + enabled inputs.
     assert {event["status"] for event in acquisition_events} == {"succeeded"}
     assert all(event["query_parameters"] for event in acquisition_events)
     assert all(event["acquisition_started_utc"] for event in acquisition_events)

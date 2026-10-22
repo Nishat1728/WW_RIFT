@@ -185,6 +185,7 @@ def _quality_control_references(paths: ProjectPaths) -> dict[str, dict[str, Any]
         "soil_coverage": paths.quality_control / "soil_coverage.json",
         "rainfall_coverage": paths.quality_control / "rainfall_coverage.json",
         "initial_state_coverage": paths.quality_control / "initial_state_coverage.json",
+        "spinup_baseflow": paths.quality_control / "spinup_baseflow.json",
         "directory_contract": paths.quality_control / "directory_contract.json",
     }
     for name, path in candidates.items():
@@ -343,7 +344,7 @@ class RunManifestWriter:
         return redact_sensitive(records if isinstance(records, list) else [])
 
     def _root_outputs(self) -> list[dict[str, Any]]:
-        names = ("rift_case.cfg", "RUN.md", "case_manifest.json")
+        names = ("rift_case.cfg", "rift_spinup.cfg", "simulation_plan.json", "RUN.md", "case_manifest.json")
         return [
             _file_record(self.paths, self.paths.root / name)
             for name in names if (self.paths.root / name).is_file()

@@ -39,6 +39,7 @@ rainfall:
 inflows: {enabled: false, provider: none}
 coastal: {enabled: false, provider: none}
 drainage: {enabled: false, provider: none}
+spinup: {enabled: false}  # No inlet gauge is assumed in the first-run demo.
 outlets:
   source: auto_hydrography_lowest
   method: open_corridor
@@ -50,3 +51,5 @@ simulation:
   start_time_s: 0
   # end_time_s is inferred from rainfall: 172800 seconds / 48 hours.
   output_interval_s: 3600
+  output_directory: results/transient
+  save_hotstart: true

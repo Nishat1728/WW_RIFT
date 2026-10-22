@@ -23,11 +23,18 @@ def _parser() -> argparse.ArgumentParser:
     validate.add_argument("config", help="Path to a case YAML file.")
     providers = commands.add_parser("providers", help="Print the provider catalog.")
     providers.add_argument("--category", default=None)
+    stages = commands.add_parser("simulate-stages", help="Run spin-up, checked depth handoff, then transient (requires RIFT GPU solver).")
+    stages.add_argument("case_root")
+    stages.add_argument("--executable", required=True, help="Path to the installed RIFT solver.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "simulate-stages":
+        from .spinup import run_stages
+        print(run_stages(args.case_root, args.executable))
+        return 0
     if args.command == "run":
         result = run_case(args.config)
         print(json.dumps({key: str(value) for key, value in asdict(result).items()}, indent=2))

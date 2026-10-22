@@ -1,0 +1,26 @@
+{
+  "schema": "riftprep-baseflow-validation-v1",
+  "tested_date": "2026-10-22",
+  "environment": "Linux, Storrs HPC compute node",
+  "status": "PASSED",
+  "provider": "USGS Water Data daily",
+  "site": "01184000",
+  "parameter_code": "00060",
+  "statistic_id": "00003",
+  "history_start_date": "2003-02-10",
+  "history_end_date": "2023-02-09",
+  "requested_days": 7305,
+  "valid_days": 7305,
+  "missing_days": 0,
+  "coverage_fraction": 1.0,
+  "quantile": 0.0,
+  "quantile_method": "numpy.quantile(method='linear')",
+  "discharge_m3_s": 50.12081846784,
+  "raw_product_modified": false,
+  "cache_mode": "fresh",
+  "notes": [
+    "This checks acquisition, statistic selection, SI conversion and constant-hydrograph preparation.",
+    "This gauge is a network test, not an inlet automatically assigned to the HUC12 demo.",
+    "The four-month GPU spin-up simulation was not run. The stage runner was tested with solver fixtures."
+  ]
+}

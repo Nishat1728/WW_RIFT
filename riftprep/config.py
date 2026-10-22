@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+import math
 from typing import Any, Literal
 
 
@@ -115,6 +116,17 @@ class SimulationSpec:
     gpu_device: int = 0
     output_interval_s: float = 3600.0
     output_directory: str = "results/native"
+    save_hotstart: bool = True
+    start_utc: str | None = None
+    end_utc: str | None = None
+
+    def __post_init__(self) -> None:
+        if not all(math.isfinite(v) for v in (
+            self.start_time_s, self.end_time_s, self.output_interval_s,
+        )) or self.end_time_s <= self.start_time_s or self.output_interval_s <= 0:
+            raise ValueError("Simulation needs finite increasing times and a positive output interval.")
+        if Path(self.output_directory).is_absolute() or ".." in Path(self.output_directory).parts:
+            raise ValueError("Output directory must be a case-relative path without '..'.")
 
 
 @dataclass(frozen=True)

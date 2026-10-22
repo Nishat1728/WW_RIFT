@@ -41,6 +41,7 @@ source-smoke-*.out
 deliverables/
 tmp/
 .publish/
+.validation_spinup/
 .netrc
 _netrc
 .cdsapirc

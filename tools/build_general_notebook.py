@@ -513,12 +513,7 @@ SIMULATION_DURATION_PREVIEW = widgets.HTML()
 def update_simulation_duration(change=None):
     SIMULATION_DURATION_HOURS_WIDGET.disabled = RAIN_ENABLED_WIDGET.value
     try:
-        seconds = simulation_duration_seconds({
-            "rain_enabled": RAIN_ENABLED_WIDGET.value,
-            "rain_start": RAIN_START_WIDGET.value,
-            "rain_end": RAIN_END_WIDGET.value,
-            "simulation_duration_hours": SIMULATION_DURATION_HOURS_WIDGET.value,
-        })
+        seconds = simulation_duration_seconds(snapshot_widget_values(globals()))
         SIMULATION_DURATION_PREVIEW.value = (
             f"<b>Simulation duration:</b> {seconds / 3600:g} hours ({seconds:g} seconds). "
             "Simulation time starts at 0; rebuild the managers after changing settings."
@@ -687,6 +682,114 @@ display(widget_box(
     OUTLET_CUT_ELEVATION_WIDGET, OUTLET_WIDTH_WIDGET,
 ))'''),
 
+    markdown("""## ✏️ USER EDIT — transient time and output controls
+
+By default the event matches the rainfall window above. To choose different dates, uncheck
+**Match rainfall window**: these dates then control downloads of ALL enabled transient forcings.
+Both solver clocks begin at zero; UTC dates identify their real-world windows. Save frequency
+applies to depth, discharge, water-surface and hotstart outputs together."""),
+    code('''TRANSIENT_MATCH_RAINFALL_WIDGET = widgets.Checkbox(
+    value=True, description="Match rainfall window", indent=False)
+TRANSIENT_START_WIDGET = widgets.Text(value="2023-06-10T00:00:00Z", description="Event start UTC", style=WIDGET_STYLE)
+TRANSIENT_END_WIDGET = widgets.Text(value="2023-06-11T00:00:00Z", description="Event end UTC", style=WIDGET_STYLE)
+TRANSIENT_OUTPUT_HOURS_WIDGET = widgets.FloatText(value=1.0, description="Save every (hours)", style=WIDGET_STYLE)
+TRANSIENT_SAVE_HOTSTART_WIDGET = widgets.Checkbox(value=True, description="Save transient hotstarts", indent=False)
+TRANSIENT_OUTPUT_DIRECTORY_WIDGET = widgets.Text(value="results/transient", description="Event output folder", style=WIDGET_STYLE)
+
+def update_event_controls(change=None):
+    match = TRANSIENT_MATCH_RAINFALL_WIDGET.value and RAIN_ENABLED_WIDGET.value
+    TRANSIENT_START_WIDGET.disabled = match
+    TRANSIENT_END_WIDGET.disabled = TRANSIENT_MATCH_RAINFALL_WIDGET.value
+    if match:
+        TRANSIENT_START_WIDGET.value = RAIN_START_WIDGET.value
+        TRANSIENT_END_WIDGET.value = RAIN_END_WIDGET.value
+    elif TRANSIENT_MATCH_RAINFALL_WIDGET.value:
+        from datetime import timedelta
+        from riftprep.spinup import utc_time
+        try:
+            TRANSIENT_END_WIDGET.value = (utc_time(TRANSIENT_START_WIDGET.value)
+                + timedelta(hours=SIMULATION_DURATION_HOURS_WIDGET.value)).isoformat()
+        except (ValueError, OverflowError):
+            pass
+    update_simulation_duration()
+
+for control in (TRANSIENT_MATCH_RAINFALL_WIDGET, RAIN_START_WIDGET, RAIN_END_WIDGET,
+                RAIN_ENABLED_WIDGET, TRANSIENT_START_WIDGET, SIMULATION_DURATION_HOURS_WIDGET):
+    control.observe(update_event_controls, names="value")
+update_event_controls()
+for control in (TRANSIENT_START_WIDGET, TRANSIENT_END_WIDGET):
+    control.observe(update_simulation_duration, names="value")
+display(widget_box(TRANSIENT_MATCH_RAINFALL_WIDGET, TRANSIENT_START_WIDGET,
+                 TRANSIENT_END_WIDGET, TRANSIENT_OUTPUT_HOURS_WIDGET,
+                 TRANSIENT_SAVE_HOTSTART_WIDGET, TRANSIENT_OUTPUT_DIRECTORY_WIDGET))'''),
+
+    markdown("""## ✏️ USER EDIT — rain-free spin-up and historical baseflow
+
+Enable the two-stage run to create **rift_spinup.cfg + rift_case.cfg**. The default spin-up
+window is four calendar months immediately before the event, with **daily output** and
+**hotstart ON**. Uncheck the automatic window to enter your own start/end (end must equal event start).
+
+Choose **USGS historical daily mean** to download the preceding **20 years** for your explicit
+gauges and derive a constant hydrograph for each river boundary. Quantile is a non-exceedance
+probability: **0 = observed minimum**, 0.05 = fifth percentile, 0.5 = median. It is NOT a guarantee
+of perennial flow or separated groundwater baseflow. Genuine zeros remain zero. Missing/invalid
+days are excluded without filling; default minimum record coverage is 90% and is reported.
+
+The station JSON uses the same `site`, `id`, and optional `support`/`support_width_m` as transient
+inflows. A gauge is NOT an automatically valid upstream boundary: choose non-overlapping inlet
+catchments and review placement. No ungauged or area-scaled inflow is invented. Alternatively
+choose **User constant**, with `constant_m3_s` and explicit support coordinates.
+
+Example historical station (replace site and support for your domain):
+`[{"site":"01184000","id":"inlet","support":{"x":-72.2,"y":41.7,"crs":"EPSG:4326"}}]`
+
+Example manual station:
+`[{"id":"inlet","constant_m3_s":0.2,"support":{"x":-72.2,"y":41.7,"crs":"EPSG:4326"}}]`
+
+No rainfall is acquired for spin-up. The selected constant has two endpoints spanning its whole
+duration. **Depth-only handoff:** velocities, soil and urban storage are not transferred. Read
+the generated RUN.md before simulation; latest saved depth can be one output interval old."""),
+    code('''SPINUP_ENABLED_WIDGET = widgets.Checkbox(value=True, description="Prepare spin-up + transient CFGs", indent=False)
+SPINUP_AUTO_WINDOW_WIDGET = widgets.Checkbox(value=True, description="Four calendar months before event", indent=False)
+SPINUP_START_WIDGET = widgets.Text(value="2023-02-10T00:00:00Z", description="Spin-up start UTC", style=WIDGET_STYLE)
+SPINUP_END_WIDGET = widgets.Text(value="2023-06-10T00:00:00Z", description="Spin-up end UTC", style=WIDGET_STYLE)
+SPINUP_SOURCE_WIDGET = widgets.Dropdown(
+    options=[("USGS historical daily mean — quantile", "usgs_waterdata"),
+             ("User constant (m³/s)", "manual_constant")], value="usgs_waterdata",
+    description="Baseflow method", style=WIDGET_STYLE)
+SPINUP_USE_INFLOW_STATIONS_WIDGET = widgets.Checkbox(value=False, description="Use transient inflow station list", indent=False)
+SPINUP_STATIONS_WIDGET = widgets.Textarea(value="[]", description="Spin-up stations JSON", style=WIDGET_STYLE,
+    layout=widgets.Layout(width="100%", height="100px"))
+SPINUP_HISTORY_YEARS_WIDGET = widgets.IntText(value=20, description="History (years)", style=WIDGET_STYLE)
+SPINUP_QUANTILE_WIDGET = widgets.BoundedFloatText(value=0, min=0, max=1, step=0.001,
+    description="Flow quantile (0–1)", style=WIDGET_STYLE)
+SPINUP_MINIMUM_COVERAGE_WIDGET = widgets.FloatSlider(value=0.9, min=0.01, max=1, step=0.01,
+    description="Minimum valid-day fraction", readout_format=".2f", style=WIDGET_STYLE)
+SPINUP_OUTPUT_HOURS_WIDGET = widgets.FloatText(value=24.0, description="Save every (hours)", style=WIDGET_STYLE)
+SPINUP_SAVE_HOTSTART_WIDGET = widgets.Checkbox(value=True, description="Save spin-up hotstarts", indent=False)
+SPINUP_OUTPUT_DIRECTORY_WIDGET = widgets.Text(value="results/spinup", description="Spin-up output folder", style=WIDGET_STYLE)
+
+def update_spinup_controls(change=None):
+    from riftprep.spinup import calendar_shift
+    automatic = SPINUP_AUTO_WINDOW_WIDGET.value
+    SPINUP_START_WIDGET.disabled = SPINUP_END_WIDGET.disabled = automatic
+    SPINUP_STATIONS_WIDGET.disabled = SPINUP_USE_INFLOW_STATIONS_WIDGET.value
+    if automatic:
+        try:
+            SPINUP_END_WIDGET.value = TRANSIENT_START_WIDGET.value
+            SPINUP_START_WIDGET.value = calendar_shift(SPINUP_END_WIDGET.value, months=-4)
+        except ValueError:
+            pass  # The manager-build cell reports invalid calendar dates.
+
+for control in (SPINUP_AUTO_WINDOW_WIDGET, TRANSIENT_START_WIDGET, SPINUP_USE_INFLOW_STATIONS_WIDGET):
+    control.observe(update_spinup_controls, names="value")
+update_spinup_controls()
+display(widget_box(SPINUP_ENABLED_WIDGET, SPINUP_AUTO_WINDOW_WIDGET, SPINUP_START_WIDGET,
+    SPINUP_END_WIDGET, SPINUP_SOURCE_WIDGET, SPINUP_USE_INFLOW_STATIONS_WIDGET,
+    SPINUP_STATIONS_WIDGET, SPINUP_HISTORY_YEARS_WIDGET, SPINUP_QUANTILE_WIDGET,
+    SPINUP_MINIMUM_COVERAGE_WIDGET, SPINUP_OUTPUT_HOURS_WIDGET,
+    SPINUP_SAVE_HOTSTART_WIDGET, SPINUP_OUTPUT_DIRECTORY_WIDGET))'''),
+
     markdown("""## Build and log the source managers
 
 This is analogous to Watershed Workflow's source-manager setup cell. It validates the choices,
@@ -709,7 +812,16 @@ display(Markdown(
     f"**Simulation duration:** "
     f"{spec.simulation.end_time_s - spec.simulation.start_time_s:g} seconds "
     f"({(spec.simulation.end_time_s - spec.simulation.start_time_s) / 3600:g} hours)"
-))'''),
+))
+if spec.spinup.enabled:
+    display(JSON({"spinup_start_utc": spec.spinup.start_utc,
+                  "spinup_end_utc": spec.spinup.end_utc,
+                  "duration_days": spec.spinup.duration_s / 86400,
+                  "baseflow_history_request": spec.spinup.download_options(),
+                  "spinup_output_interval_s": spec.spinup.output_interval_s,
+                  "spinup_hotstart": spec.spinup.save_hotstart,
+                  "transient_output_interval_s": spec.simulation.output_interval_s,
+                  "transient_hotstart": spec.simulation.save_hotstart}))'''),
 
     markdown("""## Domain manager: load and display the study area"""),
     code('''boundary = builder.load_domain()
@@ -737,6 +849,12 @@ display(JSON(grid.as_dict()))'''),
 
     markdown("""## Rainfall manager: download the original forcing and display"""),
     code('''raw_rainfall = download_and_show("rainfall")'''),
+
+    markdown("""## Spin-up baseflow manager: save historical daily observations or the user definition
+
+This history is separate from event inflows. All provider pages are saved under
+`raw/spinup_baseflow/`; quantile calculation and spatial checks occur during processing."""),
+    code('''raw_spinup_baseflow = download_and_show("spinup_baseflow")'''),
 
     markdown("""## Optional forcing managers: drainage, inflows, and coastal stage"""),
     code('''raw_optional = {}
@@ -807,6 +925,9 @@ display(Markdown("## Final per-input status"))
 display(input_status)
 display(timings)
 display(JSON(qc))
+if spec.spinup.enabled:
+    display(JSON(json.loads((result.case_root / "quality_control/spinup_baseflow.json").read_text())))
+    display(JSON(json.loads((result.case_root / "simulation_plan.json").read_text())))
 display(Markdown(f"**Checksummed raw artifacts:** {len(raw_inventory)}"))
 display(Markdown(f"**Run provenance:** `{result.run_manifest_path}`"))
 display(JSON({
@@ -844,7 +965,9 @@ for figure_name in (
 - `quality_control/provenance/run_manifest.json`: latest versioned success/failure/resume provenance
 - `quality_control/provenance/run_manifests/`: one history record per workflow attempt
 - `quality_control/timings/`: measured wall-clock time for every stage
-- `rift_case.cfg`, `RUN.md`, `case_manifest.json`: the runnable RIFT case
+- `rift_case.cfg`: transient/event configuration
+- `rift_spinup.cfg`, `simulation_plan.json`: rain-free spin-up and explicit run order (when enabled)
+- `RUN.md`, `case_manifest.json`: instructions and provenance; simulation is a separate step
 
 For backward compatibility, a resumed case that already contains `rift_inputs/` continues to use
 that directory without migration. New cases always use `simulation_ready/`. The resolved choice is
@@ -880,7 +1003,9 @@ demo["cells"][0]["source"] = (
     "the simulation duration must therefore be **48 hours (172800 seconds)**.\n\n"
     "No manual land or soil replacements are preselected. Review any diagnostic map if "
     "a provider product changes. Optional bathymetry, inflows, coastal stage, and drainage "
-    "are disabled. The automatic terrain-matched outlet is an illustrative boundary choice; "
+    "and historical-baseflow spin-up are disabled because this demo does not select an upstream gauge. "
+    "Enable spin-up and select your inlet gauges to generate both CFGs. "
+    "The automatic terrain-matched outlet is an illustrative boundary choice; "
     "review it before scientific use.\n\n"
     "Run the cells from top to bottom. All defaults are ready for this demo; **Run All** "
     "downloads everything again under `demo_cases/demo_huc12_180101080101/`. "
@@ -892,6 +1017,8 @@ replacements = {
     'value="010802050801"': 'value="180101080101"',
     'value="2023-06-11T00:00:00Z"': 'value="2023-06-12T00:00:00Z"',
     'value=160, description="Plot DPI"': 'value=110, description="Plot DPI"',
+    'widgets.Checkbox(value=True, description="Prepare spin-up + transient CFGs"':
+        'widgets.Checkbox(value=False, description="Prepare spin-up + transient CFGs"',
 }
 for cell in demo["cells"]:
     source = "".join(cell["source"])

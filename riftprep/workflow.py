@@ -81,6 +81,11 @@ class CaseResult:
     def run_manifest_path(self) -> Path:
         return self.case_root / "quality_control" / "provenance" / "run_manifest.json"
 
+    @property
+    def spinup_config_path(self) -> Path | None:
+        path = self.case_root / "rift_spinup.cfg"
+        return path if path.is_file() else None
+
 
 @dataclass(frozen=True)
 class RawDownloadResult:
@@ -323,6 +328,8 @@ def _unit_factor(unit: str, station: dict[str, Any], purpose: str) -> float:
         ("discharge", "ft3/s"): 0.028316846592,
         ("discharge", "ft^3/s"): 0.028316846592,
         ("discharge", "cfs"): 0.028316846592,
+        ("discharge", "m3/s"): 1.0,
+        ("discharge", "m^3/s"): 1.0,
         ("stage", "ft"): 0.3048,
         ("stage", "m"): 1.0,
     }
@@ -477,7 +484,7 @@ class RIFTInputBuilder:
 
     product_order = (
         "dem", "initial_state", "hydrography", "land_cover", "soil", "rainfall",
-        "drainage", "inflows", "coastal",
+        "drainage", "inflows", "coastal", "spinup_baseflow",
     )
 
     def __init__(self, spec_or_path: CaseSpec | str | Path):
@@ -893,6 +900,12 @@ def _run_case_impl(
         with timings.stage("process_inflows"):
             inflow_table, inflow_plot_data = _prepare_inflows(spec.inflows, raw, grid, paths)
 
+    baseflow_table = baseflow_plot_data = None
+    if spec.spinup.enabled:
+        from .spinup import prepare_baseflow
+        with timings.stage("process_spinup_baseflow"):
+            baseflow_table, baseflow_plot_data = prepare_baseflow(spec, raw, grid, paths)
+
     surge_sampled = surge_stage_path = None
     if spec.coastal.enabled:
         with timings.stage("process_coastal"):
@@ -948,6 +961,8 @@ def _run_case_impl(
                 _save_plots(
                     plot_hydrographs(inflow_plot_data), paths, "processed_inflows", spec
                 )
+            if baseflow_plot_data:
+                _save_plots(plot_hydrographs(baseflow_plot_data), paths, "processed_spinup_baseflow", spec)
             if surge_sampled is not None:
                 fig, ax = plt.subplots(figsize=(6.4, 3.8), constrained_layout=True)
                 ax.plot(
@@ -980,6 +995,10 @@ def _run_case_impl(
             carved_outlets=carved,
             extra_rasters=extra,
         )
+        if baseflow_table is not None:
+            baseflow_report = validate_case(grid, final_dem, node_mask, inflow_table=baseflow_table)
+            report.errors.extend(f"Spin-up: {item}" for item in baseflow_report.errors)
+            report.checks.extend(f"Spin-up: {item}" for item in baseflow_report.checks)
         qc_json_path, _ = _write_qc(report, paths)
         report.raise_for_errors()
 
@@ -1021,8 +1040,16 @@ def _run_case_impl(
             "external_drainage": False,
             "surge": surge_sampled is not None,
         }
-        config_path = build_rift_config(paths.root / "rift_case.cfg", spec.simulation, inputs, modules)
-        write_run_instructions(paths.root / "RUN.md", config_path.name)
+        if spec.spinup.enabled:
+            from .spinup import write_phase_configs
+            config_path = write_phase_configs(spec, paths, inputs, modules, baseflow_table)
+        else:
+            config_path = build_rift_config(paths.root / "rift_case.cfg", spec.simulation, inputs, modules)
+        write_run_instructions(
+            paths.root / "RUN.md", config_path.name,
+            output_directory=spec.simulation.output_directory,
+            spinup_cfg_path="rift_spinup.cfg" if spec.spinup.enabled else None,
+        )
 
     input_status_rows = []
     for name, product in raw.products.items():
@@ -1037,6 +1064,8 @@ def _run_case_impl(
             processed_report = paths.quality_control / "rainfall_coverage.json"
         elif name == "initial_state":
             processed_report = paths.quality_control / "initial_state_coverage.json"
+        elif name == "spinup_baseflow":
+            processed_report = paths.quality_control / "spinup_baseflow.json"
         if processed_report is not None and processed_report.is_file():
             status = json.loads(processed_report.read_text(encoding="utf-8")).get(
                 "status", status
@@ -1068,6 +1097,8 @@ def _run_case_impl(
             for name, item in raw.products.items()
         },
         "rift_config": str(config_path),
+        "spinup_config": str(paths.root / "rift_spinup.cfg") if spec.spinup.enabled else None,
+        "simulation_plan": str(paths.root / "simulation_plan.json") if spec.spinup.enabled else None,
         "qc_report": str(qc_json_path),
         "input_status_summary": str(input_status_json),
         "wall_clock": str(paths.timings / "wall_clock.csv"),

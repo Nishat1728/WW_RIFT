@@ -1903,9 +1903,13 @@ def fetch_usgs_waterdata(
             {
                 "site": _waterdata_site_id(station["site"]),
                 "parameter_code": str(station.get(
-                    "parameter_code", "00060" if name == "inflows" else "00065"
+                    "parameter_code", "00060" if name in {"inflows", "spinup_baseflow"} else "00065"
                 )),
                 "collection": str(station.get("collection", default_collection)),
+                **({"statistic_id": "00003", **(
+                    {"time_series_id": str(station["time_series_id"])}
+                    if station.get("time_series_id") else {}
+                )} if station.get("collection", default_collection) == "daily" else {}),
             }
             for station in stations
         ],
@@ -1935,9 +1939,9 @@ def fetch_usgs_waterdata(
                     f"{base}/monitoring-locations/items/{site}",
                     params={"f": "json"}, timeout=600,
                 )
+                location_path.write_bytes(response.content)
                 response.raise_for_status()
                 json.loads(response.content)
-                location_path.write_bytes(response.content)
                 files[f"location_{bare_site}"] = location_path
                 downloaded_names.append(location_path.name)
 
@@ -1951,15 +1955,25 @@ def fetch_usgs_waterdata(
                     f"{product.options['start_utc']}/{product.options['end_utc']}"
                 ),
             }
+            if collection == "daily":
+                params.pop("datetime")
+                params["time"] = f"{product.options['start_utc'][:10]}/{product.options['end_utc'][:10]}"
+                params["statistic_id"] = request["statistic_id"]
+                if request.get("time_series_id"):
+                    params["time_series_id"] = request["time_series_id"]
             page = 1
+            visited = set()
             while url:
+                if url in visited or page > 1000:
+                    raise RuntimeError("USGS pagination repeated a URL or exceeded 1000 pages.")
+                visited.add(url)
                 page_path = raw_dir / (
                     f"waterdata_{collection}_{bare_site}_{parameter}_page_{page:03d}.json"
                 )
                 response = session.get(url, params=params, timeout=600)
+                page_path.write_bytes(response.content)
                 response.raise_for_status()
                 payload = response.json()
-                page_path.write_bytes(response.content)
                 files[
                     f"observations_{collection}_{bare_site}_{parameter}_{page:03d}"
                 ] = page_path
@@ -2087,7 +2101,7 @@ def acquire_raw_product(
                 before=before,
             )
             return result
-    if name in {"inflows", "coastal"}:
+    if name in {"inflows", "coastal", "spinup_baseflow"}:
         product = getattr(spec, name)
         if not product.enabled:
             raise ValueError(f"Raw product {name!r} is disabled in the case configuration.")
@@ -2095,7 +2109,15 @@ def acquire_raw_product(
             started_utc = datetime.now(timezone.utc).isoformat()
             before = _raw_file_state(paths.raw / name)
             try:
-                if product.provider == "usgs_waterdata":
+                if name == "spinup_baseflow" and product.provider == "manual_constant":
+                    directory = paths.raw / name
+                    directory.mkdir(parents=True, exist_ok=True)
+                    definition = directory / "user_baseflow_definition.json"
+                    definition.write_text(json.dumps(product.options, indent=2), encoding="utf-8")
+                    ledger.register(name, "manual_constant", definition, product.options)
+                    result = RawProduct(name, "manual_constant", {"definition": definition},
+                                        {"method": "explicit_user_constant", "stations": product.options["stations"]})
+                elif product.provider == "usgs_waterdata":
                     result = fetch_usgs_waterdata(
                         name, product, paths, ledger, spec.plots.raw_products,
                         spec.plots.dpi, spec.cache.mode == "reuse",
@@ -2140,7 +2162,7 @@ def acquire_all_raw(
     products: dict[str, RawProduct] = {}
     for name in (
         "dem", "hydrography", "land_cover", "soil", "rainfall",
-        "drainage", "inflows", "coastal",
+        "drainage", "inflows", "coastal", "spinup_baseflow",
         "initial_state",
     ):
         if getattr(spec, name).enabled:
