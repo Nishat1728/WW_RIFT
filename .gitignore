@@ -17,6 +17,7 @@ dist/
 cases/
 rift_cases/
 demo_cases/
+demo_inputs/
 validation_runs/
 raw/
 processed/

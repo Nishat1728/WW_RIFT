@@ -48,6 +48,7 @@ from .source_adapters import (
     download_soilgrids_hydraulic,
 )
 from .spec import CaseSpec, ProductSpec
+from .service_health import check_wms_service
 
 
 def _ssurgo_request_details(args, kwargs) -> dict[str, Any]:
@@ -889,11 +890,19 @@ def fetch_land_cover(
             )
         nc_path = raw_dir / f"nlcd_{location}_{year}_native.nc"
         raster_paths = {var: raw_dir / f"nlcd_{var}_{year}_native.tif" for var in variables}
+        health = None
         if reuse_existing and nc_path.is_file() and all(path.is_file() for path in raster_paths.values()):
             files = {"netcdf": nc_path, **raster_paths}
             tile_count = int(product.options.get("cached_tile_count", 1))
         else:
             _, _, ManagerNLCD, _, set_data_directory = _ww_sources()
+            from pygeoogc import ServiceURL
+
+            health = check_wms_service(
+                ServiceURL().wms.mrlc, raw_dir / "service_diagnostics",
+                max_attempts=max_attempts,
+                timeout=float(product.options.get("request_timeout_seconds", 30)),
+            )
             set_data_directory(str(paths.provider_cache / "land_cover"))
             # pygeohydro/async-retriever uses a shared SQLite HTTP cache.  Concurrent
             # ManagerNLCD calls can contend for that database on large tiled domains
@@ -922,6 +931,8 @@ def fetch_land_cover(
                         )
                         if not retryable or attempt == max_attempts:
                             raise
+                        print(f"NLCD download attempt {attempt}/{max_attempts} failed: {error}. "
+                              "Retrying the same selected source.", flush=True)
                         time.sleep(min(30.0, 3.0 * 2 ** (attempt - 1)))
                 raise AssertionError("unreachable")
 
@@ -1048,6 +1059,7 @@ def fetch_land_cover(
             "tile_count": tile_count,
             "download_workers": workers, "max_attempts": max_attempts,
             "manual_dimension_constants": manual_dimension_constants,
+            "service_health": health,
         }
     elif product.provider == "local":
         for variable, source in product.options["rasters"].items():

@@ -109,11 +109,15 @@ def _map(ax, data, grid, title, label, cmap="viridis", **kwargs):
 def plot_dem_domain(original_dem, final_dem, node_mask, grid: GridSpec, wall_elevation_m=9999.0):
     fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.8), constrained_layout=True)
     interior = np.where(node_mask, original_dem, np.nan)
-    vmin, vmax = np.nanpercentile(interior, [1, 99])
-    _map(axes[0], original_dem, grid, "a  Downloaded DEM", "Elevation (m)", vmin=vmin, vmax=vmax, cmap="terrain")
-    _map(axes[1], interior, grid, "b  Active domain", "Elevation (m)", vmin=vmin, vmax=vmax, cmap="terrain")
     display = np.where(np.isclose(final_dem, wall_elevation_m), np.nan, final_dem)
-    _map(axes[2], display, grid, "c  Final terrain", "Elevation (m)", vmin=min(0, vmin), vmax=vmax, cmap="terrain")
+    # Equal elevations must have the same colour in every comparison panel.
+    # Include real outlet cuts, exclude artificial walls, and avoid a combined
+    # full-grid allocation on regional domains.
+    vmin = min(float(np.nanmin(interior)), float(np.nanmin(display)))
+    vmax = max(float(np.nanmax(interior)), float(np.nanmax(display)))
+    _map(axes[0], original_dem, grid, "a  Terrain before wall/outlets", "Elevation (m)", vmin=vmin, vmax=vmax, cmap="terrain")
+    _map(axes[1], interior, grid, "b  Active domain", "Elevation (m)", vmin=vmin, vmax=vmax, cmap="terrain")
+    _map(axes[2], display, grid, "c  Final terrain", "Elevation (m)", vmin=vmin, vmax=vmax, cmap="terrain")
     axes[2].contour(
         np.isclose(final_dem, wall_elevation_m), levels=[0.5], extent=_extent(grid),
         origin="upper", colors="#d62728", linewidths=0.65,

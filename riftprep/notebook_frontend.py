@@ -48,6 +48,18 @@ def snapshot_widget_values(namespace: Mapping[str, Any]) -> dict[str, Any]:
     return values
 
 
+def require_current_settings(built: Mapping[str, Any], current: Mapping[str, Any]) -> None:
+    """Prevent a running manager from silently using settings changed in the UI."""
+    changed = sorted(key for key in built.keys() | current.keys()
+                     if built.get(key) != current.get(key))
+    if changed:
+        raise ValueError(
+            "Settings changed after the source managers were built: " + ", ".join(changed)
+            + ". Rerun 'Build and log the source managers', then the domain and enabled "
+            "download cells. Fresh mode downloads again; choose reuse explicitly to keep raw data."
+        )
+
+
 def _value(values: Mapping[str, Any], name: str, default: Any = None) -> Any:
     return values.get(name, default)
 

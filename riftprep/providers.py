@@ -227,6 +227,8 @@ def get_huc_boundary(
     level = huc_level or len(code)
     if level not in (2, 4, 6, 8, 10, 12, 14, 16) or len(code) != level:
         raise ValueError("The HUC code length must match an even HUC level from 2 to 16.")
+    if not code.isdigit():
+        raise ValueError("The HUC code must contain digits only.")
     max_attempts = max(1, int(max_attempts))
     retry_delay_seconds = max(0.0, float(retry_delay_seconds))
     # The current USGS WBD service uses layer 0 for WBDLine, followed by
@@ -254,14 +256,30 @@ def get_huc_boundary(
     for attempt in range(1, max_attempts + 1):
         for query_url, query_params, timeout in queries:
             try:
+                request_params = dict(query_params)
+                if attempt % 2 == 0:
+                    # An equivalent query form can succeed after gateway errors.
+                    # Without wildcard characters, LIKE is an equivalent exact
+                    # match for the validated numeric HUC. Download afresh and
+                    # verify identity below; never broaden or reuse a boundary.
+                    request_params["where"] = request_params["where"].replace(
+                        f"='{code}'", f" LIKE '{code}'", 1
+                    )
                 response = requests.get(
-                    query_url, params=query_params, timeout=timeout
+                    query_url, params=request_params, timeout=timeout,
+                    headers={"Cache-Control": "no-cache"},
                 )
                 response.raise_for_status()
                 candidate = response.json()
                 if candidate.get("features"):
-                    payload = candidate
-                    break
+                    identities = [next((str(value).strip() for key, value in
+                                  feature.get("properties", {}).items() if key.lower() == field), None)
+                                  for feature in candidate["features"]]
+                    if all(identity == code for identity in identities):
+                        payload = candidate
+                        break
+                    last_detail = f"response HUC identity mismatch: {identities}"
+                    continue
                 last_detail = str(
                     candidate.get("error") or "empty feature collection"
                 )
@@ -269,6 +287,8 @@ def get_huc_boundary(
                 last_detail = f"{type(error).__name__}: {error}"
         if payload.get("features"):
             break
+        print(f"USGS WBD attempt {attempt}/{max_attempts} did not return HUC {code}: "
+              f"{last_detail}", flush=True)
         if attempt < max_attempts and retry_delay_seconds:
             time.sleep(min(retry_delay_seconds * (2 ** (attempt - 1)), 30.0))
     if not payload.get("features"):

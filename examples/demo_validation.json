@@ -1,41 +1,204 @@
 {
-  "schema": "riftprep-demo-validation-v1",
-  "tested_date": "2026-10-22",
-  "environment": "Linux, Storrs HPC compute node",
   "status": "passed",
-  "unit_tests_passed": 92,
-  "notebook": "examples/HUC12_Demo.ipynb",
-  "configuration": "examples/demo_huc12_180101080101.yaml",
-  "huc_code": "180101080101",
+  "failures": [],
   "cache_mode": "fresh",
   "native_dem_product_m": 30,
-  "rift_dem_cellsize_m": 30,
-  "rainfall_start_utc": "2023-06-10T00:00:00Z",
-  "rainfall_end_utc": "2023-06-12T00:00:00Z",
-  "simulation_duration_seconds": 172800,
-  "rainfall_records_including_initial": 49,
+  "rift_dem_cellsize_m": 30.0,
   "input_statuses": {
     "dem": "PASSED",
     "initial_state": "PASSED",
     "hydrography": "PASSED",
     "land_cover": "PASSED",
     "soil": "PASSED",
-    "rainfall": "PASSED"
+    "rainfall": "PASSED",
+    "spinup_baseflow": "PASSED",
+    "inflows": "PASSED"
   },
+  "land_cover_status": "PASSED",
+  "soil_status": "PASSED",
+  "rainfall_status": "PASSED",
   "rainfall_zero_replacement_cells": 0,
   "manual_land_cover_values": {},
-  "manual_soil_values": {},
-  "raw_product_count": 10,
-  "raw_checksums_verified": 10,
+  "manual_soil_values": {
+    "permeability": {
+      "mode": "user_constant",
+      "value": 1e-12,
+      "filled_active_nodes": 6347
+    },
+    "porosity": {
+      "mode": "user_constant",
+      "value": 0.42,
+      "filled_active_nodes": 6361
+    },
+    "residual": {
+      "mode": "user_constant",
+      "value": 0.08,
+      "filled_active_nodes": 6361
+    },
+    "alpha": {
+      "mode": "user_constant",
+      "value": 0.0002,
+      "filled_active_nodes": 6361
+    }
+  },
+  "raw_product_count": 17,
   "raw_products_all_isolated": true,
   "raw_product_modified": false,
-  "download_raw_dem_wall_seconds": 9.02667565178126,
-  "total_notebook_wall_seconds": 70.69958361331373,
-  "case_bytes": 203227400,
-  "failures": [],
+  "download_raw_dem_wall_seconds": 17.89929203875363,
+  "download_raw_dem_duration": "0h 00m 18s",
+  "total_notebook_wall_seconds": 86.82853017095476,
+  "total_notebook_duration": "0h 01m 27s",
+  "case_bytes": 316410380,
+  "case_root": "/path/to/WW_RIFT/demo_cases/demo_huc12_010801040205",
+  "timing_csv": "/path/to/WW_RIFT/demo_cases/demo_huc12_010801040205/quality_control/timings/wall_clock.csv",
+  "run_manifest": "/path/to/WW_RIFT/demo_cases/demo_huc12_010801040205/quality_control/provenance/run_manifest.json",
+  "huc_code": "010801040205",
+  "huc_name": "Lake Morey-Connecticut River",
+  "simulation_duration_seconds": 172800.0,
+  "rainfall_records": 49,
+  "raw_checksums_verified": 17,
+  "spinup_enabled": true,
+  "spinup_duration_seconds": 10540800.0,
+  "spinup_history_years": 20,
+  "baseflow_stations": [
+    {
+      "id": "connecticut_inlet",
+      "site": "01138500",
+      "requested_days": 7305,
+      "valid_days": 7305,
+      "missing_days": 0,
+      "coverage_fraction": 1.0,
+      "minimum_coverage": 0.9,
+      "rejected_observations": 0,
+      "out_of_window_observations": 0,
+      "zero_flow_days": 0,
+      "first_valid_day": "2003-03-10",
+      "last_valid_day": "2023-03-09",
+      "quantile": 0.0,
+      "quantile_method": "numpy.quantile(method='linear')",
+      "gap_filling": "none",
+      "method": "observed_daily_mean_quantile",
+      "time_series_id": "cac34bd51e3c449a829c63acbba5a04a",
+      "provider_unit": "ft^3/s",
+      "discharge_m3_s": 16.027335171072,
+      "approval_status_counts": {
+        "Approved": 7305
+      },
+      "support_x_m": 1888834.2427072653,
+      "support_y_m": 2572299.7386659756,
+      "support_crs": "EPSG:5070"
+    }
+  ],
+  "event_inflows_enabled": true,
+  "simulation_plan_schema": "riftprep-two-stage-v2",
+  "two_cfgs_verified": true,
+  "full_gpu_simulation_executed": false,
+  "nlcd_reuse": {
+    "reused": true,
+    "product": "Legacy NLCD 2021",
+    "source_case": "locked30_huc8_01080104",
+    "source_catalog_sha256": "0613b8a0a64a6a1e7bb4ee0be0271f86cb2fe409cec37ba11c0d2208c8afc6f9",
+    "raw_product_modified": false,
+    "artifacts": [
+      {
+        "variable": "cover",
+        "file": "nlcd_cover_2021_native.tif",
+        "sha256": "390e3b97d442f5aee8d63af325f972fe34ac7066caeb0f4ca102a54ba6baee2e"
+      },
+      {
+        "variable": "impervious",
+        "file": "nlcd_impervious_2021_native.tif",
+        "sha256": "60f7579c0ad0d00393327f0e3294e3f19dfebba5f68c82dc6447016b1550d2d7"
+      },
+      {
+        "variable": "canopy",
+        "file": "nlcd_canopy_2021_native.tif",
+        "sha256": "dab5cbc8aef4864ecfcc5dbc6f1f5ebc4f843388744bd79c487ab43195c1aa1e"
+      }
+    ],
+    "reason": "Explicit user-approved NLCD-only exception during provider outage"
+  },
+  "all_provider_inputs_fresh": false,
+  "soil_coverage_before_manual_resolution": {
+    "permeability": {
+      "active_nodes": 169458,
+      "covered_active_nodes": 163111,
+      "missing_active_nodes": 6347,
+      "missing_percent": 3.7454708541349477,
+      "complete": false,
+      "missing_bounds_projected": [
+        1887090.0,
+        2548200.0,
+        1897440.0,
+        2572350.0
+      ]
+    },
+    "porosity": {
+      "active_nodes": 169458,
+      "covered_active_nodes": 163097,
+      "missing_active_nodes": 6361,
+      "missing_percent": 3.753732488286183,
+      "complete": false,
+      "missing_bounds_projected": [
+        1886520.0,
+        2548200.0,
+        1897440.0,
+        2572350.0
+      ]
+    },
+    "residual": {
+      "active_nodes": 169458,
+      "covered_active_nodes": 163097,
+      "missing_active_nodes": 6361,
+      "missing_percent": 3.753732488286183,
+      "complete": false,
+      "missing_bounds_projected": [
+        1886520.0,
+        2548200.0,
+        1897440.0,
+        2572350.0
+      ]
+    },
+    "alpha": {
+      "active_nodes": 169458,
+      "covered_active_nodes": 163097,
+      "missing_active_nodes": 6361,
+      "missing_percent": 3.753732488286183,
+      "complete": false,
+      "missing_bounds_projected": [
+        1886520.0,
+        2548200.0,
+        1897440.0,
+        2572350.0
+      ]
+    }
+  },
+  "soil_residual_porosity_check": {
+    "criterion": "residual saturation must be less than porosity",
+    "accepted_gap_threshold": 0.1,
+    "accepted_rule": "residual_minus_porosity < accepted_gap_threshold",
+    "values_modified": false,
+    "violating_active_nodes": 0,
+    "accepted_by_tolerance_nodes": 0,
+    "materially_invalid_nodes": 0,
+    "minimum_gap": null,
+    "maximum_gap": null,
+    "maximum_accepted_gap": null,
+    "minimum_material_gap": null
+  },
+  "source_code_sha256": "d77c5818af134f258d0add79c8b7471ae0ae264304e3ad3ad75b6e44ee43e8d2",
+  "schema": "riftprep-demo-validation-v2",
+  "tested_date": "2026-10-28",
+  "environment": "Linux, Storrs HPC compute node",
+  "unit_tests_passed": 108,
+  "validation_slurm_job_id": "32448693",
+  "notebook": "examples/HUC12_Demo.ipynb",
+  "executed_notebook": "examples/HUC12_Demo_Executed.ipynb",
+  "configuration": "examples/demo_huc12_010801040205.yaml",
   "notes": [
-    "Input preparation was executed end to end; the RIFT solver was not run.",
-    "Timing and storage reflect this run, not a guarantee for other machines or provider states.",
-    "Only preview maps and this summary are distributed; users acquire their own raw data."
+    "Input preparation completed end to end; the four-month GPU spin-up and event solver were not run.",
+    "Fresh downloads for every provider input except explicitly approved, checksum-verified prior NLCD rasters.",
+    "User-approved soil constants apply only to missing processed cells; raw soil products are unchanged.",
+    "Host-specific paths are replaced with portable placeholders; measured timings and values are unchanged."
   ]
 }

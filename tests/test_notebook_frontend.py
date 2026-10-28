@@ -8,9 +8,17 @@ from riftprep.notebook_frontend import (
     build_case_from_widget_values,
     case_payload_from_widget_values,
     simulation_duration_seconds,
+    require_current_settings,
 )
 from riftprep.spec import case_from_mapping, load_case
 from riftprep.writers import build_rift_config
+
+
+def test_changed_widget_settings_cannot_silently_use_old_managers():
+    built = {"huc_code": "010802050801", "rain_start": "2023-06-10T00:00:00Z"}
+    require_current_settings(built, dict(built))
+    with pytest.raises(ValueError, match="Settings changed.*huc_code"):
+        require_current_settings(built, {**built, "huc_code": "180101080101"})
 
 
 def test_published_notebook_cells_are_parseable_and_user_facing():
@@ -27,6 +35,11 @@ def test_published_notebook_cells_are_parseable_and_user_facing():
     assert "every row below has an executable backend" in joined
     assert "NEEDS USER INPUT" in joined
     assert "initial_state" in joined
+    assert 'Legacy NLCD — MRLC (2021 products)' in joined
+    assert 'options=[("Annual NLCD"' not in joined
+    assert joined.index("sys.path.insert") < joined.index("from riftprep import")
+    assert 'acquisition stopped — no product accepted' in joined
+    assert 'require_current_settings(widget_values' in joined
     assert "land_cover_percentage_over_100_before_correction_map.png" in joined
     assert "land_cover_percentage_after_correction_map.png" in joined
     for provider in (
@@ -180,15 +193,20 @@ def test_yaml_infers_duration_unless_end_is_explicit():
     assert case_from_mapping(payload).simulation.end_time_s == 7200
 
 
-def test_huc12_demo_uses_public_sources_and_infers_48_hours():
+def test_huc12_demo_uses_public_sources_two_stages_and_infers_48_hours():
     root = Path(__file__).resolve().parents[1]
-    spec = load_case(root / "examples" / "demo_huc12_180101080101.yaml")
-    assert spec.domain.huc_code == "180101080101"
+    settings = json.loads((root / "examples/huc12_demo_settings.json").read_text())
+    spec = load_case(root / "examples" / settings["configuration"])
+    assert spec.domain.huc_code == settings["huc_code"]
     assert spec.domain.cell_size_m == spec.dem.options["resolution_m"] == 30
     assert spec.cache.mode == "fresh"
     assert spec.simulation.end_time_s == 172800
     assert not spec.land_cover.options["manual_fill_values"]
-    assert not spec.soil.options["manual_fill_values"]
+    assert spec.soil.options["manual_fill_values"] == settings["manual_soil_fill_values"]
+    assert spec.spinup.enabled and spec.inflows.enabled
+    assert spec.spinup.history_years == 20
+    assert spec.spinup.output_interval_s == 86400
+    assert len(spec.inflows.options["stations"]) == len(spec.spinup.stations) == len(settings["inflow_stations"])
     demo = json.loads((root / "examples" / "HUC12_Demo.ipynb").read_text())
     for index, cell in enumerate(demo["cells"]):
         source = "".join(cell["source"])

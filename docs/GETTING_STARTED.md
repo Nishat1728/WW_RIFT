@@ -49,7 +49,8 @@ See [`docs/RUN_PROVENANCE_MANIFEST.md`](RUN_PROVENANCE_MANIFEST.md) for the vers
 run-level manifest and its machine-readable JSON schema.
 
 For the two-stage controls, read [Spin-up and transient](SPINUP_AND_TRANSIENT.md) first.
-The event-only HUC12 demo intentionally has spin-up disabled: it does not assume inlet gauges.
+The HUC12 demo includes one explicitly placed upstream gauge and prepares both configurations;
+its gauge-transfer assumptions are documented in `examples/README.md`.
 
 ## Beginner walkthrough
 
@@ -175,37 +176,38 @@ conda activate riftprep
 jupyter lab examples/HUC12_Demo.ipynb
 ```
 
-The demo uses HUC **180101080101**, a **30 m 3DEP DEM**, a **30 m RIFT grid**, public 3DHP/NLCD/
-SSURGO/AORC sources, a dry initial state, and a **48-hour event** from June 10 to June 12, 2023 UTC.
-Its case name is `demo_huc12_180101080101`, and its output root is `demo_cases/` in the repository.
+The demo uses HUC **010801040205, Lake Morey–Connecticut River**, a **30 m 3DEP DEM**, a
+**30 m RIFT grid**, public 3DHP/legacy NLCD/SSURGO/AORC sources, and a **48-hour event**
+from July 10 to July 12, 2023 UTC. Its case name is `demo_huc12_010801040205`, and its
+output root is `demo_cases/` in the repository.
 The notebook finds the repository root even when Jupyter starts its kernel in `examples/`.
 
 All default settings are ready: run from top to bottom, or use **Run All** for this demo only.
-Downloads are fresh on every run. No land-cover/soil replacement constants are preselected;
-inspect diagnostics if provider data change. The automatic terrain-matched outlet is illustrative,
-and optional bathymetry, inflows, coastal stage, and drainage are disabled. This is a demonstration
-of input preparation, not a calibrated simulation.
+Downloads are fresh by default. The demo's visible soil constants are explicit user-approved
+assumptions for missing cells; no land-cover constants are preselected. Inspect the original
+gap map and replacement counts. The demo enables an observed upstream river inflow
+and a four-month rain-free spin-up using the preceding 20 years of daily discharge. It writes both
+CFGs with complete hotstart continuation. The notebook does not run the GPU solver. Gauge-to-inlet
+transfer and terrain-matched outlet choices are illustrative; read [example assumptions](../examples/README.md).
 
-The same case is available as [YAML](../examples/demo_huc12_180101080101.yaml):
+The same case is available as [YAML](../examples/demo_huc12_010801040205.yaml):
 
 ```bash
-riftprep validate-config examples/demo_huc12_180101080101.yaml
-riftprep run examples/demo_huc12_180101080101.yaml
+riftprep validate-config examples/demo_huc12_010801040205.yaml
+riftprep run examples/demo_huc12_010801040205.yaml
 ```
 
 The repository includes the example instructions and configuration; users download their own
 source data. Runtime depends on network and provider response times. The demo uses public services,
 so an outage can stop it even when installation and configuration are correct.
 
-Validated on Storrs on **2026-10-22** with fresh downloads: **81 unit tests passed** and every
-enabled demo input passed QC. The final demo took **138.94 seconds (2 min 19 s)**, including
-**37.95 seconds** for DEM acquisition. All **10 raw-artifact checksums** matched; no manual land
-or soil replacements were applied. These are one run's measurements, not runtime promises.
-The event contains zero rainfall in this basin according to the acquired forcing; no source-null
-rainfall cells were replaced. The final HDF5 contains 49 time records, including its initial record.
-See the portable [validation summary](../examples/demo_validation.json).
+See the portable [validation summary](../examples/demo_validation.json) for the actual tested
+case, acquisition policy, timings, QC results and raw checksums. During an NLCD outage, the user
+may explicitly approve verified earlier NLCD rasters for a test while other inputs are downloaded
+fresh. Such a test is labelled **fresh except for NLCD**, never entirely fresh. The clean notebook
+retains the online-source default. Measurements are specific to a run, not runtime promises.
 
-![Demo: downloaded terrain, active study area, and final RIFT terrain](../examples/demo_dem.png)
+![Demo: terrain before wall/outlets, active study area, and final RIFT terrain](../examples/demo_dem.png)
 
 [View the demo rainfall plot](../examples/demo_rainfall.png). These small preview images are included
 for GitHub readers; the full source datasets and case outputs are downloaded/generated locally.
@@ -416,6 +418,16 @@ Every input receives one of three clear states:
 - `FAILED` — the product is unreadable, structurally invalid, or violates a hard criterion.
 
 ### Land cover
+
+The online dropdown uses **legacy NLCD 2021**, not the distinct Annual NLCD product series.
+Before the downloader reads CRS metadata, an uncached health request checks HTTP status and WMS
+structure. A `503` or an HTML error page is reported as a provider outage, with bounded retries
+and untouched response/checksum evidence in `raw/land_cover/service_diagnostics/`. An error page
+cannot establish CRS support and is never reported as proof that your chosen CRS is invalid.
+
+Retry when the service recovers, or explicitly select **Local** and supply verified cover,
+imperviousness and canopy rasters with adequate geographic coverage. Other inputs can still use
+fresh downloads. The notebook does not silently choose cached data or switch to Annual NLCD.
 
 NLCD class, imperviousness, and canopy are checked at every active RIFT node. If any active value
 is null, `quality_control/land_cover_coverage_map.png` displays the whole study area in gray and

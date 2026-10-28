@@ -18,7 +18,8 @@ downloading data, and checking the resulting inputs.
 
 - [Beginner installation and step-by-step guide](docs/GETTING_STARTED.md)
 - [General notebook](RIFT_Input_Builder.ipynb) — HUC, polygon or rectangle; not basin-specific
-- [Prefilled HUC12 demo](examples/HUC12_Demo.ipynb) — a small, event-only first run
+- [Prefilled HUC12 demo](examples/HUC12_Demo.ipynb) — observed inflow, four-month spin-up and transient CFGs
+- [Executed demo with plots and QC](examples/HUC12_Demo_Executed.ipynb)
 - [Spin-up + transient guide](docs/SPINUP_AND_TRANSIENT.md) — two configurations, historical low flows and output controls
 - [Sources, credentials and limitations](docs/RIFT_INPUT_SOURCE_CATALOG.md)
 
@@ -115,11 +116,17 @@ Read [DEM preservation](docs/DEM_PRESERVATION.md), [directory ownership](docs/DI
 
 ## Examples and testing
 
-The [HUC12 demo](examples/HUC12_Demo.ipynb) uses fresh public U.S. inputs, a nominal 30 m USGS DEM
-and a 30 m RIFT grid for a 48-hour event. It deliberately has spin-up and optional boundaries
-disabled: no upstream gauge is assumed. Enable spin-up with appropriate gauges or constants
-for a two-stage case. Example maps and a validation receipt are in `examples/`; downloaded
-forcing and simulation outputs are not included.
+The [HUC12 demo](examples/HUC12_Demo.ipynb) prepares Lake Morey–Connecticut River
+(010801040205) at 30 m for a 48-hour event, observed upstream inflow and a four-month rain-free
+spin-up. Both CFGs use complete hotstart continuation. Read [example assumptions](examples/README.md)
+before adopting the gauge boundary. The notebook prepares inputs; it does not run the GPU solver.
+
+The online land-cover adapter requests **legacy NLCD 2021**, which is distinct from Annual NLCD.
+Service failures stop with bounded retries and saved HTTP-response evidence. No source is silently
+substituted. Verified earlier rasters can be selected explicitly through the local-raster controls;
+the validation receipt discloses any NLCD-only reuse. Downloaded forcing is not included in GitHub.
+See the [measured timings and QC receipt](examples/demo_validation.json) and
+[stage-by-stage timings](examples/demo_timings.csv) for the published example.
 
 ```bash
 python -m pip install -e ".[test,notebook]"

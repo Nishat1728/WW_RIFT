@@ -62,7 +62,7 @@ It does not imply that resampling creates new spatial or temporal information.
 
 | Provider key | Source | Coverage / native resolution | Status | RIFT conversion |
 |---|---|---|---|---|
-| `nlcd` | [Annual NLCD / MRLC](https://www.mrlc.gov/data) | U.S.; 30 m land cover, imperviousness, canopy products | **working** | Save native layers, nearest-neighbor map, translate classes to Manning n |
+| `nlcd` | [Legacy NLCD 2021 / MRLC](https://www.mrlc.gov/data) | U.S.; 30 m legacy land cover, imperviousness, canopy; distinct from Annual NLCD | **working** | Save native layers, nearest-neighbor map, translate classes to Manning n |
 | `landfire` | [LANDFIRE](https://landfire.gov/data-downloads) | U.S.; 30 m vegetation/fuel/canopy products | adapter needed | Select layers/year and define explicit Manning crosswalk |
 | `esa_worldcover` | [ESA WorldCover](https://esa-worldcover.org/en/data-access) | Global; 10 m, 2020/2021 | adapter needed | Download COG tiles and define explicit class-to-Manning crosswalk |
 | `copernicus_lcfm` | [Copernicus LCFM successor to WorldCover](https://esa-worldcover.org/en/news) | Global; operational 10 m land-cover family | adapter needed | Select release, download tiles, and crosswalk classes |

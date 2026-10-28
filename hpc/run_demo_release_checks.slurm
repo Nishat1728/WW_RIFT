@@ -25,6 +25,6 @@ before="$(sha256sum RIFT_Input_Builder.ipynb examples/HUC12_Demo.ipynb)"
 "$RIFTPREP_PYTHON" tools/build_general_notebook.py
 after="$(sha256sum RIFT_Input_Builder.ipynb examples/HUC12_Demo.ipynb)"
 test "$before" = "$after"
-"$RIFTPREP_PYTHON" -m riftprep.cli validate-config examples/demo_huc12_180101080101.yaml
+"$RIFTPREP_PYTHON" -m riftprep.cli validate-config examples/demo_huc12_010801040205.yaml
 "$RIFTPREP_PYTHON" -m hpc.validate_demo_notebook
 echo "DEMO_RELEASE_CHECKS_PASSED"

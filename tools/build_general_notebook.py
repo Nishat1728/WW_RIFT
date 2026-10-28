@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ast
 from copy import deepcopy
 from pathlib import Path
 
@@ -49,19 +50,13 @@ Run the cells from top to bottom. Edit only cells with the large **✏️ USER E
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import ipywidgets as widgets
 from IPython.display import Image, JSON, Markdown, display
-
-from riftprep import (
-    RIFTInputBuilder, build_rift_inputs,
-)
-from riftprep.notebook_frontend import (
-    build_case_from_widget_values, simulation_duration_seconds, snapshot_widget_values,
-)
 
 REPOSITORY_ROOT = next((
     folder for folder in (Path.cwd(), *Path.cwd().parents)
@@ -70,6 +65,14 @@ REPOSITORY_ROOT = next((
 if REPOSITORY_ROOT is None:
     raise RuntimeError("Extract/clone the complete repository before opening this notebook.")
 os.chdir(REPOSITORY_ROOT)
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from riftprep import RIFTInputBuilder, build_rift_inputs
+from riftprep.notebook_frontend import (
+    build_case_from_widget_values, simulation_duration_seconds, snapshot_widget_values,
+    require_current_settings,
+)
 
 plt.rcParams["figure.figsize"] = (8, 6)
 pd.options.display.max_colwidth = 120
@@ -133,11 +136,24 @@ WIDGET_STYLE = {"description_width": "220px"}
 
 def download_and_show(name):
     """Download, gate, then show one accepted native product."""
+    require_current_settings(widget_values, snapshot_widget_values(globals()))
     selected = getattr(spec, name)
     if not selected.enabled:
         display(Markdown(f"**{name}: disabled**"))
         return None
-    product = builder.download(name)
+    print(f"Downloading {name} from {selected.provider}; selected source is unchanged.", flush=True)
+    try:
+        product = builder.download(name)
+    except Exception:
+        display(Markdown(f"### ⚠️ {name}: acquisition stopped — no product accepted"))
+        display(Markdown(
+            "Read the exception and saved provider diagnostics. A server failure does not "
+            "mean that the selected CRS is wrong. Retry this download cell after recovery; "
+            "to select local data, change its source widget and rebuild the managers."
+        ))
+        for diagnostic in sorted((builder.paths.raw / name / "service_diagnostics").glob("wms_health_*.json"))[-1:]:
+            display(JSON(json.loads(diagnostic.read_text())))
+        raise
     qc = builder.qc_result(name)
     display(Markdown(f"### ✅ {name}: `{qc.status}` — `{product.provider}`"))
     if (
@@ -378,12 +394,17 @@ reported and capped to exactly 100% without changing the downloaded raw file. Th
 a black flagged-cell map before this correction and a second map of the corrected percentage
 products. Unsupported or non-integer cover classes are counted, marked null only in the
 processing copy, and displayed in black on the full-area coverage map. Remaining null or
-negative cells require an explicit supported cover class/constant or corrected local raster."""),
+negative cells require an explicit supported cover class/constant or corrected local raster.
+
+The online adapter selects **legacy NLCD 2021**, not the separate Annual NLCD series. Provider
+HTTP failures have bounded retries and saved response evidence. A service outage never silently
+changes the source or reuses another case; to use verified prior downloads, select **Local** and
+provide all three rasters with their original CRS and coverage."""),
     code('''show_source_options("Land cover, imperviousness, canopy, and Manning roughness")
 
 LAND_ENABLED_WIDGET = widgets.Checkbox(value=True, description="Enable land cover", indent=False)
 LAND_SOURCE_WIDGET = widgets.Dropdown(
-    options=[("Annual NLCD", "watershed_workflow_nlcd"),
+    options=[("Legacy NLCD — MRLC (2021 products)", "watershed_workflow_nlcd"),
              ("Local cover/impervious/canopy rasters", "local")],
     value="watershed_workflow_nlcd", description="Land-cover source", style=WIDGET_STYLE,
 )
@@ -511,7 +532,10 @@ SIMULATION_DURATION_PREVIEW = widgets.HTML()
 
 
 def update_simulation_duration(change=None):
-    SIMULATION_DURATION_HOURS_WIDGET.disabled = RAIN_ENABLED_WIDGET.value
+    SIMULATION_DURATION_HOURS_WIDGET.disabled = (
+        RAIN_ENABLED_WIDGET.value
+        or not globals().get("TRANSIENT_MATCH_RAINFALL_WIDGET", RAIN_ENABLED_WIDGET).value
+    )
     try:
         seconds = simulation_duration_seconds(snapshot_widget_values(globals()))
         SIMULATION_DURATION_PREVIEW.value = (
@@ -799,7 +823,8 @@ display(widget_box(SPINUP_ENABLED_WIDGET, SPINUP_AUTO_WINDOW_WIDGET, SPINUP_STAR
 
 This is analogous to Watershed Workflow's source-manager setup cell. It validates the choices,
 saves a reusable YAML configuration, initializes the case-local data directory, and displays
-exactly which manager will provide each input."""),
+exactly which manager will provide each input. After changing any control, rerun this cell and
+the domain/download cells; the notebook checks for stale settings before continuing."""),
     code('''widget_values = snapshot_widget_values(globals())
 spec, config_path, override_used = build_case_from_widget_values(
     widget_values, environment=os.environ
@@ -829,7 +854,8 @@ if spec.spinup.enabled:
                   "transient_hotstart": spec.simulation.save_hotstart}))'''),
 
     markdown("""## Domain manager: load and display the study area"""),
-    code('''boundary = builder.load_domain()
+    code('''require_current_settings(widget_values, snapshot_widget_values(globals()))
+boundary = builder.load_domain()
 grid = builder.grid
 
 ax = boundary.to_crs(grid.crs).plot(facecolor="none", edgecolor="black", linewidth=1.2)
@@ -872,7 +898,8 @@ for name in ("drainage", "inflows", "coastal"):
 
 This cell refuses to continue if any enabled manager cell was skipped. No RIFT-grid interpolation
 has occurred yet."""),
-    code('''downloaded = builder.finish_raw_downloads()
+    code('''require_current_settings(widget_values, snapshot_widget_values(globals()))
+downloaded = builder.finish_raw_downloads()
 display(Markdown(f"**Raw phase complete:** `{downloaded.summary_path}`"))
 display(pd.read_csv(downloaded.timing_csv_path))
 display(JSON(json.loads(downloaded.summary_path.read_text())))'''),
@@ -882,7 +909,8 @@ display(JSON(json.loads(downloaded.summary_path.read_text())))'''),
 This cell uses only the raw products created above. It does not delete the case or download a
 second copy. Processing includes remapping to the requested RIFT grid, writing forcing files,
 quality-control checks, configuration, manifest, and run instructions."""),
-    code('''try:
+    code('''require_current_settings(widget_values, snapshot_widget_values(globals()))
+try:
     result = build_rift_inputs(downloaded)
 except Exception:
     display(Markdown("## ⚠️ Processing stopped at a quality gate"))
@@ -1000,35 +1028,64 @@ print(OUTPUT)
 
 # Keep the demonstration synchronized with the same front end and backend.
 demo = deepcopy(notebook)
+settings = json.loads((ROOT / "examples/huc12_demo_settings.json").read_text(encoding="utf-8"))
 demo["cells"][0]["source"] = (
-    "# First run: HUC12 demonstration\n\n"
-    "This is the general RIFT Input Builder prefilled for HUC **180101080101**, with a "
-    "30 m USGS DEM, a 30 m RIFT grid, public U.S. sources, and fresh downloads. "
-    "The event is 2023-06-10 00:00 UTC to 2023-06-12 00:00 UTC: "
-    "the simulation duration must therefore be **48 hours (172800 seconds)**.\n\n"
-    "No manual land or soil replacements are preselected. Review any diagnostic map if "
-    "a provider product changes. Optional bathymetry, inflows, coastal stage, and drainage "
-    "and historical-baseflow spin-up are disabled because this demo does not select an upstream gauge. "
-    "Enable spin-up and select your inlet gauges to generate both CFGs. "
-    "The automatic terrain-matched outlet is an illustrative boundary choice; "
-    "review it before scientific use.\n\n"
-    "Run the cells from top to bottom. All defaults are ready for this demo; **Run All** "
-    "downloads everything again under `demo_cases/demo_huc12_180101080101/`. "
-    "For your own study, use `RIFT_Input_Builder.ipynb` and follow the README.\n"
+    f"# Fresh HUC12 example — {settings['huc_name']}\n\n"
+    f"HUC **{settings['huc_code']}**, {settings['region']}; nominal 30 m USGS DEM and exact 30 m RIFT grid. "
+    f"The 48-hour event is **{settings['event_start_utc']} → {settings['event_end_utc']}**.\n\n"
+    "This example exercises the updated front end: native downloads, land/soil/rainfall QC, "
+    "observed event inflow, 20-year USGS low-flow history, four-calendar-month rain-free "
+    "spin-up configuration, and a complete-hotstart transient configuration. "
+    "Periodic hotstarts default ON; spin-up outputs are daily and event outputs hourly.\n\n"
+    "**Input preparation only:** Run All downloads and validates inputs and writes both CFGs. "
+    "It does not execute four months of GPU simulation or calibrate a flood model. Read "
+    "`examples/README.md` for the upstream-gauge approximation and boundary choices. "
+    "The visible soil constants are user-approved illustrative replacements for missing "
+    "processed cells; raw SSURGO is unchanged. No land-cover constants are preselected. "
+    "Review the diagnostic maps and replacement counts before scientific use.\n\n"
+    f"**Fresh mode:** Run All replaces only the package-marked case "
+    f"`demo_cases/{settings['case_name']}/` and downloads again. "
+    "For another basin use `RIFT_Input_Builder.ipynb` and update the gauges/boundaries too.\n"
 ).splitlines(keepends=True)
-replacements = {
-    'value="my_rift_case"': 'value="demo_huc12_180101080101"',
-    'value="rift_cases"': 'value="demo_cases"',
-    'value="010802050801"': 'value="180101080101"',
-    'value="2023-06-11T00:00:00Z"': 'value="2023-06-12T00:00:00Z"',
-    'value=160, description="Plot DPI"': 'value=110, description="Plot DPI"',
-    'widgets.Checkbox(value=True, description="Prepare spin-up + transient CFGs"':
-        'widgets.Checkbox(value=False, description="Prepare spin-up + transient CFGs"',
+defaults = {
+    "CASE_NAME_WIDGET": settings["case_name"], "OUTPUT_ROOT_WIDGET": "demo_cases",
+    "HUC_CODE_WIDGET": settings["huc_code"], "CACHE_MODE_WIDGET": "fresh", "PLOT_DPI_WIDGET": 110,
+    "RAIN_START_WIDGET": settings["event_start_utc"], "RAIN_END_WIDGET": settings["event_end_utc"],
+    "INFLOW_ENABLED_WIDGET": True, "INFLOW_START_WIDGET": settings["event_start_utc"],
+    "INFLOW_END_WIDGET": settings["event_end_utc"],
+    "INFLOW_STATIONS_WIDGET": json.dumps(settings["inflow_stations"]),
+    "SPINUP_ENABLED_WIDGET": True, "SPINUP_USE_INFLOW_STATIONS_WIDGET": True,
+    "SPINUP_STATIONS_WIDGET": json.dumps(settings["inflow_stations"]),
+    "SOIL_FILL_WIDGET": json.dumps(settings["manual_soil_fill_values"]),
+    "OUTLET_SOURCE_WIDGET": "coordinates", "OUTLET_COORDINATES_WIDGET": json.dumps([settings["outlet"]]),
+    "OUTLET_CRS_WIDGET": "EPSG:4326", "OUTLET_WIDTH_WIDGET": settings["outlet"]["width_m"],
 }
 for cell in demo["cells"]:
     source = "".join(cell["source"])
-    for old, new in replacements.items():
-        source = source.replace(old, new)
+    if cell["cell_type"] == "code" and not source.lstrip().startswith("%"):
+        # Edit the constructor's value expression, not unrelated occurrences of
+        # the same string. UTF-8 byte offsets match Python's AST column offsets.
+        data = source.encode("utf-8")
+        lines = data.splitlines(keepends=True)
+        offsets = [0]
+        for line in lines:
+            offsets.append(offsets[-1] + len(line))
+        edits = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+                continue
+            name = node.targets[0].id if isinstance(node.targets[0], ast.Name) else None
+            if name not in defaults:
+                continue
+            for keyword in node.value.keywords:
+                if keyword.arg == "value":
+                    value = keyword.value
+                    edits.append((offsets[value.lineno-1]+value.col_offset,
+                                  offsets[value.end_lineno-1]+value.end_col_offset,
+                                  repr(defaults[name]).encode("utf-8")))
+        for start, end, replacement in sorted(edits, reverse=True):
+            data = data[:start] + replacement + data[end:]
+        source = data.decode("utf-8")
     cell["source"] = source.splitlines(keepends=True)
 demo_path = ROOT / "examples" / "HUC12_Demo.ipynb"
 demo_path.parent.mkdir(exist_ok=True)

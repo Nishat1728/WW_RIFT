@@ -4,6 +4,14 @@ All notable changes to this project are documented here. Versions follow semanti
 
 ## Unreleased
 
+- Added bounded, uncached NLCD service-health checks with preserved HTTP evidence so provider
+  error pages cannot masquerade as invalid user coordinate systems.
+- Reviewed every notebook cell while retaining the Watershed Workflow source-manager structure;
+  corrected the legacy NLCD label, repository import setup, stale-widget guards and download diagnostics.
+- Updated the HUC12 example to exercise observed inflow, 20-year low-flow history, both CFGs and
+  explicit user-approved missing-soil constants. Any NLCD-only reuse is verified and disclosed.
+- Added equivalent fresh WBD query retries with strict HUC identity checks and a shared elevation
+  colour scale for terrain comparisons, preserving source data and basin selection.
 - Added independent spin-up/transient UTC windows, output cadences and hotstart controls
   (hotstart ON by default), with a four-calendar-month rain-free spin-up and daily outputs.
 - Added fresh USGS daily-mean discharge histories (20 years by default), selectable low-flow

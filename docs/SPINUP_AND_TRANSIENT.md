@@ -2,7 +2,8 @@
 
 The general notebook has separate graphical controls for **two configurations**. It prepares
 inputs; it does not automatically run the GPU solver. Existing YAMLs without a `spinup` block
-remain event-only. The prefilled HUC12 demo is event-only because it does not select inlet gauges.
+remain event-only. The prefilled HUC12 demo now includes an explicit upstream gauge and prepares
+both configurations; review its placement and transfer assumptions in `examples/README.md`.
 
 ## 1. Select the event window
 

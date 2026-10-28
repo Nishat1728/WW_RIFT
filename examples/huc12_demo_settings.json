@@ -1,0 +1,29 @@
+{
+  "schema": "riftprep-huc12-demo-settings-v1",
+  "huc_code": "010801040205",
+  "huc_name": "Lake Morey-Connecticut River",
+  "region": "New Hampshire/Vermont",
+  "area_sq_km": 152.52,
+  "case_name": "demo_huc12_010801040205",
+  "configuration": "demo_huc12_010801040205.yaml",
+  "event_start_utc": "2023-07-10T00:00:00Z",
+  "event_end_utc": "2023-07-12T00:00:00Z",
+  "manual_soil_fill_values": {"permeability": 1e-12, "porosity": 0.42, "residual": 0.08, "alpha": 0.0002},
+  "inflow_stations": [
+    {
+      "site": "01138500",
+      "id": "connecticut_inlet",
+      "support": {"x": -72.1159051967093, "y": 43.99433661265048, "crs": "EPSG:4326"},
+      "support_width_m": 30
+    }
+  ],
+  "outlet": {"x": -72.19999829322059, "y": 43.78764142565809, "width_m": 600},
+  "boundary_assumptions": [
+    "Upstream USGS observations are applied at the nearest named mainstem entry inside a 60 m inward-buffered HUC12 polygon; no area scaling is applied.",
+    "USGS 01138500 at Wells River is upstream of the model inlet, approximately 18.70 km away in projected straight-line distance. Applying it without routing or area scaling is an illustrative approximation; intervening ungauged contributions are not invented.",
+    "Only one upstream mainstem gauge is used, so nested station catchments are not added twice.",
+    "User-approved illustrative soil constants fill only missing processed values: permeability 1e-12 m2, porosity 0.42, residual 0.08, alpha 0.0002 Pa^-1. Raw SSURGO is unchanged.",
+    "The southern named Connecticut River endpoint defines a terrain-matched 600 m outlet corridor. Channel bathymetry is not inferred or calibrated.",
+    "This is a reproducible input-preparation example, not a calibrated flood model. Four months of GPU spin-up and the full event are not executed by the notebook."
+  ]
+}
